@@ -1,0 +1,27 @@
+plugins {
+    id 'java'
+}
+
+group = 'com.bughunter'
+version = '1.0-SNAPSHOT'
+
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    // The Montoya API is required for all Burp extensions
+    compileOnly 'net.portswigger.burp.extensions:montoya-api:2023.12.1'
+}
+
+java {
+    toolchain {
+        // Keeping consistent with your Java 21 setup
+        languageVersion = JavaLanguageVersion.of(21)
+    }
+}
+
+jar {
+    // This names the final file "RaceConditionGate.jar"
+    archiveFileName = 'RaceConditionGate.jar'
+}
