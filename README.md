@@ -59,6 +59,8 @@ Standard requests sent via Burp Suite (even in Intruder) are subject to network 
 4.  **Analyze:**
     * Watch the Status column update.
     * Click on rows to inspect responses. If you see multiple successful transactions (e.g., 200 OK) where only one should exist, you have confirmed a vulnerability.
+  
+<img width="1912" height="886" alt="Screenshot 2025-11-29 153612" src="https://github.com/user-attachments/assets/8d9e8af3-d2b8-44e8-b330-0fbdeda232c5" />
 
 ## Tech Stack
 * **Language:** Java 21
