@@ -62,6 +62,8 @@ Standard requests sent via Burp Suite (even in Intruder) are subject to network 
   
 <img width="1912" height="886" alt="Screenshot 2025-11-29 153612" src="https://github.com/user-attachments/assets/8d9e8af3-d2b8-44e8-b330-0fbdeda232c5" />
 
+https://github.com/user-attachments/assets/273b21bf-189f-454e-9e8c-6b75cba56d70
+
 ## Tech Stack
 * **Language:** Java 21
 * **API:** Burp Suite Montoya API
