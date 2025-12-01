@@ -2,9 +2,7 @@
 
 **A Synchronization Tool for testing Time-of-Check to Time-of-Use (TOCTOU) Vulnerabilities**
 
-![Java](https://img.shields.io/badge/Java-21-orange)
-![Burp Suite](https://img.shields.io/badge/Burp%20Suite-Montoya%20API-blue)
-![License](https://img.shields.io/badge/License-MIT-green)
+![Java](https://img.shields.io/badge/Java-ED8B00?style=for-the-badge&logo=java&logoColor=white) ![Burp Suite](https://img.shields.io/badge/Burp_Suite-FF6633?style=for-the-badge&logo=burpsuite&logoColor=white) ![Security](https://img.shields.io/badge/Cybersecurity-Bug_Bounty-red?style=for-the-badge)
 
 ## Overview
 **Race Condition Gate** is a Burp Suite extension designed to facilitate the testing of race conditions in web applications.
