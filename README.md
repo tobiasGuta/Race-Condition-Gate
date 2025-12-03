@@ -9,55 +9,60 @@
 
 Standard requests sent via Burp Suite (even in Intruder) are subject to network jitter and sequential processing overhead. This extension allows the user to "Queue" multiple requests in a suspended state (using Java threading synchronization) and then "Release" them simultaneously using a single button. This maximizes the probability of multiple requests arriving at the server within the same execution window.
 
+**New in v2.0:** Now includes "Connection Warming" to eliminate DNS and TCP Handshake latency before the race begins.
+
 ## Features
 
-### 1. The Gate Logic
-* **Thread Synchronization:** Uses `java.util.concurrent.CountDownLatch` to pause requests just before they are sent to the network stack.
-* **Instant Release:** A dedicated button releases all paused threads instantly, minimizing the time gap between requests.
+### 1. Advanced Synchronization & Network Logic
+* **Connection Warming (Anti-Jitter):** Before waiting at the gate, every thread sends a lightweight `HEAD` request to the target. This forces the OS to resolve DNS and complete the TCP/TLS handshake. The connection is then returned to the pool, ensuring the actual race request travels over a "warm" connection instantly.
+* **Thread Synchronization:** Uses `java.util.concurrent.CountDownLatch` to align all threads perfectly before release.
+* **Resource Efficiency:** Now utilizes a `CachedThreadPool` (`ExecutorService`) instead of raw threads, allowing for high-volume testing without crashing Burp or exhausting system memory.
 
-### 2. Dedicated UI Dashboard
+### 2. Workflow Efficiency
+* **Batch Queueing:** A cascading context menu allows you to queue **1, 10, 20, or 30 requests** instantly with a single click.
+* **Legacy Compatibility:** Custom HTTP request construction ensures full compatibility with older versions of the Montoya API (2023.12.1+).
+
+### 3. Dedicated UI Dashboard
 * **Queue Table:** A clear table showing every queued request, its method, and URL.
 * **Real-Time Feedback:** Once released, the table updates with the Status Code (e.g., 200 vs 403) and the exact time taken (in microseconds).
 * **Split-View Analysis:** Click any row to see the exact **Request** sent and **Response** received in a side-by-side view.
-
-### 3. Workflow Integration
-* **Context Menu:** Right-click any request in Repeater/Proxy to `Queue This Request`.
-* **One-Click Reset:** A "Clear / Reset" button allows you to wipe the slate clean for the next test iteration.
+* **Safe Reset:** A "Clear / Reset" button cancels all pending tasks and wipes the slate clean safely.
 
 ## Installation
 
 ### Prerequisites
-* Java Development Kit (JDK) 21.
+* Java Development Kit (JDK) 17 or 21.
 * Burp Suite (Community or Professional).
 * Gradle.
 
 ### Build from Source
 1.  Clone the repository:
     ```bash
-    git clone https://github.com/tobiasGuta/Race-Condition-Gate.git
+    git clone [https://github.com/tobiasGuta/Race-Condition-Gate.git](https://github.com/tobiasGuta/Race-Condition-Gate.git)
     cd Race-Condition-Gate
     ```
 2.  Build the JAR file:
     ```bash
-    ./gradlew clean jar
+    ./gradlew clean build
     ```
 3.  Load into Burp Suite:
     * Navigate to **Extensions** -> **Installed**.
-    * Click **Add** -> Select `build/libs/RaceConditionGate.jar`.
+    * Click **Add** -> Select `build/libs/RaceConditionGate-1.0-SNAPSHOT.jar`.
 
 ## Usage Guide
 
 1.  **Prepare a Request:** Send a request to Repeater (e.g., a coupon redemption or money transfer).
 2.  **Queue the Attack:**
-    * Right-click the request -> **Race Gate: Queue This Request**.
-    * Repeat this step for as many concurrent requests as you wish to send (e.g., 10 times).
+    * Right-click the request -> **Race Gate Queue**.
+    * Select **Add 10 Requests** (or your desired amount).
+    * *Note: The tool will automatically "warm up" the connections in the background.*
 3.  **Execute:**
     * Go to the **"Race Gate"** tab.
     * Click the red **RELEASE ALL** button.
 4.  **Analyze:**
     * Watch the Status column update.
     * Click on rows to inspect responses. If you see multiple successful transactions (e.g., 200 OK) where only one should exist, you have confirmed a vulnerability.
-  
+   
 <img width="1912" height="886" alt="Screenshot 2025-11-29 153612" src="https://github.com/user-attachments/assets/8d9e8af3-d2b8-44e8-b330-0fbdeda232c5" />
 
 https://github.com/user-attachments/assets/273b21bf-189f-454e-9e8c-6b75cba56d70
@@ -65,7 +70,7 @@ https://github.com/user-attachments/assets/273b21bf-189f-454e-9e8c-6b75cba56d70
 ## Tech Stack
 * **Language:** Java 21
 * **API:** Burp Suite Montoya API
-* **Concurrency:** `CountDownLatch`, `AtomicInteger`
+* **Concurrency:** `CountDownLatch`, `ExecutorService`, `Future`
 * **UI:** Swing (JTable, JSplitPane)
 
 ## Disclaimer
