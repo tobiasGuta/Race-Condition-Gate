@@ -9,7 +9,6 @@ import burp.api.montoya.http.message.responses.HttpResponse;
 import burp.api.montoya.ui.UserInterface;
 import burp.api.montoya.ui.contextmenu.ContextMenuEvent;
 import burp.api.montoya.ui.contextmenu.ContextMenuItemsProvider;
-import burp.api.montoya.ui.contextmenu.MessageEditorHttpRequestResponse;
 import burp.api.montoya.ui.editor.EditorOptions;
 import burp.api.montoya.ui.editor.HttpRequestEditor;
 import burp.api.montoya.ui.editor.HttpResponseEditor;
@@ -24,6 +23,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 
+@SuppressWarnings("unused")
 public class RaceConditionGate implements BurpExtension, ContextMenuItemsProvider {
 
     private MontoyaApi api;
@@ -32,10 +32,14 @@ public class RaceConditionGate implements BurpExtension, ContextMenuItemsProvide
     private HttpResponseEditor responseViewer;
 
     // Thread Management
-    private final ExecutorService threadPool = Executors.newCachedThreadPool();
+    // CHANGE 1: Use FixedThreadPool to prevent crashing the JVM with too many threads
+    private final ExecutorService threadPool = Executors.newFixedThreadPool(100);
     private final List<Future<?>> activeTasks = new ArrayList<>();
 
     private static CountDownLatch gate = new CountDownLatch(1);
+
+    // CHANGE 2: Variable to track the exact moment the button was pressed
+    private volatile long gateReleaseTime = 0;
 
     @Override
     public void initialize(MontoyaApi api) {
@@ -47,6 +51,10 @@ public class RaceConditionGate implements BurpExtension, ContextMenuItemsProvide
             JTable table = new JTable(tableModel);
             table.setFont(new Font("SansSerif", Font.PLAIN, 12));
             table.setSelectionMode(ListSelectionModel.SINGLE_SELECTION);
+
+            // Set column widths
+            table.getColumnModel().getColumn(0).setPreferredWidth(30); // ID
+            table.getColumnModel().getColumn(6).setPreferredWidth(80); // Offset
 
             JButton releaseBtn = new JButton("RELEASE ALL");
             releaseBtn.setBackground(new Color(255, 100, 100));
@@ -70,7 +78,11 @@ public class RaceConditionGate implements BurpExtension, ContextMenuItemsProvide
                     if (selectedRow != -1) {
                         RaceResult result = tableModel.getResult(selectedRow);
                         requestViewer.setRequest(result.request);
-                        responseViewer.setResponse(result.response);
+                        if(result.response != null) {
+                            responseViewer.setResponse(result.response);
+                        } else {
+                            responseViewer.setResponse(null);
+                        }
                     }
                 }
             });
@@ -93,39 +105,36 @@ public class RaceConditionGate implements BurpExtension, ContextMenuItemsProvide
         });
 
         api.userInterface().registerContextMenuItemsProvider(this);
-        api.logging().logToOutput("Race Gate Loaded. Compatibility Mode (2023.12.1).");
+        api.extension().registerUnloadingHandler(threadPool::shutdownNow); // Cleanup on unload
+        api.logging().logToOutput("Race Gate Loaded. Jitter & Port Fixes Applied.");
     }
 
     @Override
     public List<Component> provideMenuItems(ContextMenuEvent event) {
-        if (event.messageEditorRequestResponse().isEmpty()) return null;
+        if (event.messageEditorRequestResponse().isEmpty()) {
+            return null;
+        }
 
-        MessageEditorHttpRequestResponse editor = event.messageEditorRequestResponse().get();
-        HttpRequestResponse reqResp = editor.requestResponse();
+        return List.of(createRaceGateMenu(event.messageEditorRequestResponse().get().requestResponse()));
+    }
 
-        // Cascading Menu
+    private JMenu createRaceGateMenu(HttpRequestResponse requestResponse) {
         JMenu parentMenu = new JMenu("Race Gate Queue");
 
         JMenuItem item1 = new JMenuItem("Add 1 Request");
-        item1.addActionListener(l -> queueBatch(reqResp, 1));
+        item1.addActionListener(l -> queueBatch(requestResponse, 1));
 
         JMenuItem item10 = new JMenuItem("Add 10 Requests");
-        item10.addActionListener(l -> queueBatch(reqResp, 10));
+        item10.addActionListener(l -> queueBatch(requestResponse, 10));
 
         JMenuItem item20 = new JMenuItem("Add 20 Requests");
-        item20.addActionListener(l -> queueBatch(reqResp, 20));
-
-        JMenuItem item30 = new JMenuItem("Add 30 Requests");
-        item30.addActionListener(l -> queueBatch(reqResp, 30));
+        item20.addActionListener(l -> queueBatch(requestResponse, 20));
 
         parentMenu.add(item1);
         parentMenu.add(item10);
         parentMenu.add(item20);
-        parentMenu.add(item30);
 
-        List<Component> menuList = new ArrayList<>();
-        menuList.add(parentMenu);
-        return menuList;
+        return parentMenu;
     }
 
     private void queueBatch(HttpRequestResponse reqResp, int count) {
@@ -136,40 +145,46 @@ public class RaceConditionGate implements BurpExtension, ContextMenuItemsProvide
 
     private void queueRequest(HttpRequestResponse reqResp) {
         HttpRequest requestToSend = reqResp.request();
-        HttpService service = reqResp.httpService(); // Needed for warmer
+        HttpService service = reqResp.httpService();
 
         RaceResult result = new RaceResult(requestToSend);
         int rowId = tableModel.addResult(result);
 
-        // Submit to Thread Pool
         Future<?> task = threadPool.submit(() -> {
             try {
-                // --- FIX FOR 2023.12.1 ---
-                // We manually construct the raw HTTP string.
-                // This ensures compatibility with older Montoya API versions.
+                // --- CHANGE 3: Robust Warmer Construction ---
+                // Handle non-standard ports (e.g. localhost:8080)
+                boolean isStandardPort = (service.secure() && service.port() == 443) ||
+                        (!service.secure() && service.port() == 80);
+
+                String hostHeader = isStandardPort ? service.host() : service.host() + ":" + service.port();
+
                 String warmerString = "HEAD / HTTP/1.1\r\n" +
-                        "Host: " + service.host() + "\r\n" +
+                        "Host: " + hostHeader + "\r\n" +
+                        "Connection: keep-alive\r\n" + // Force keep-alive
                         "User-Agent: Warmer\r\n" +
                         "\r\n";
 
-                // We use the factory that accepts (HttpService, String)
                 HttpRequest warmer = HttpRequest.httpRequest(service, warmerString);
-
                 api.http().sendRequest(warmer);
-                // -------------------------
+                // --------------------------------------------
 
                 // Wait for the button
                 gate.await();
 
+                // --- CHANGE 4: Capture Jitter ---
+                long myStartTime = System.nanoTime();
+                long offset = (myStartTime - gateReleaseTime) / 1000; // in microseconds
+
                 // Execute Race
-                long startTime = System.nanoTime();
                 HttpRequestResponse response = api.http().sendRequest(requestToSend);
                 long endTime = System.nanoTime();
 
                 result.response = response.response();
                 result.status = "Done";
                 result.statusCode = response.response().statusCode();
-                result.timeTakenUs = (endTime - startTime) / 1000;
+                result.timeTakenUs = (endTime - myStartTime) / 1000;
+                result.offsetUs = offset;
 
                 updateTableSafe(rowId);
 
@@ -197,6 +212,9 @@ public class RaceConditionGate implements BurpExtension, ContextMenuItemsProvide
     private void releaseGate() {
         if (activeTasks.isEmpty()) return;
         api.logging().logToOutput("Releasing gate for " + activeTasks.size() + " requests!");
+
+        // Mark the global start time T-0
+        gateReleaseTime = System.nanoTime();
         gate.countDown();
     }
 
@@ -214,7 +232,8 @@ public class RaceConditionGate implements BurpExtension, ContextMenuItemsProvide
     // --- TABLE MODEL ---
     static class RaceTableModel extends AbstractTableModel {
         private final List<RaceResult> results = new ArrayList<>();
-        private final String[] columns = {"ID", "Method", "URL", "Status", "Code", "Time (us)"};
+        // Added "Offset (us)" column
+        private final String[] columns = {"ID", "Method", "URL", "Status", "Code", "Time (us)", "Offset (us)"};
 
         public int addResult(RaceResult result) {
             results.add(result);
@@ -235,15 +254,16 @@ public class RaceConditionGate implements BurpExtension, ContextMenuItemsProvide
         @Override public String getColumnName(int column) { return columns[column]; }
         @Override public Object getValueAt(int rowIndex, int columnIndex) {
             RaceResult r = results.get(rowIndex);
-            switch (columnIndex) {
-                case 0: return r.id;
-                case 1: return r.request.method();
-                case 2: return r.request.url();
-                case 3: return r.status;
-                case 4: return (r.statusCode == 0) ? "" : r.statusCode;
-                case 5: return (r.timeTakenUs == 0) ? "" : r.timeTakenUs;
-                default: return "";
-            }
+            return switch (columnIndex) {
+                case 0 -> r.id;
+                case 1 -> r.request.method();
+                case 2 -> r.request.url();
+                case 3 -> r.status;
+                case 4 -> (r.statusCode == 0) ? "" : r.statusCode;
+                case 5 -> (r.timeTakenUs == 0) ? "" : r.timeTakenUs;
+                case 6 -> (r.status.equals("Done")) ? r.offsetUs : ""; // Only show offset if done
+                default -> "";
+            };
         }
     }
 
@@ -254,6 +274,7 @@ public class RaceConditionGate implements BurpExtension, ContextMenuItemsProvide
         String status = "Queued";
         short statusCode = 0;
         long timeTakenUs = 0;
+        long offsetUs = 0; // New field for jitter
 
         public RaceResult(HttpRequest request) {
             this.request = request;
