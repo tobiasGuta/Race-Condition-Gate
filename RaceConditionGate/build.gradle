@@ -1,0 +1,33 @@
+plugins {
+    id 'java'
+}
+
+group = 'com.bughunter'
+version = '1.0-SNAPSHOT'
+
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    // This matches the version you mentioned earlier
+    implementation 'net.portswigger.burp.extensions:montoya-api:2023.12.1'
+}
+
+java {
+    // Burp Suite runs on Java 17+ (usually 21 now).
+    // Setting this to 17 ensures compatibility.
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(21)
+    }
+}
+
+jar {
+    manifest {
+        attributes(
+                'Main-Class': 'com.bughunter.RaceConditionGate'
+        )
+    }
+    // This ensures duplicate files don't break the build
+    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+}
