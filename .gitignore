@@ -1,0 +1,6 @@
+/.idea/
+/RaceConditionGate/.gradle/
+/RaceConditionGate/build/
+*.iml
+*.class
+*.jar

@@ -23,9 +23,15 @@ import java.util.List;
 import java.util.Map;
 import java.util.TreeMap;
 import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.UnaryOperator;
 
 @SuppressWarnings("unused")
 public class RaceConditionGate implements BurpExtension, ContextMenuItemsProvider {
+
+    private static final int SAFE_THREAD_LIMIT = 20;
+    private static final int TURBO_THREAD_LIMIT = 50;
 
     private MontoyaApi api;
 
@@ -34,17 +40,28 @@ public class RaceConditionGate implements BurpExtension, ContextMenuItemsProvide
     private HttpRequestEditor requestViewer;
     private HttpResponseEditor responseViewer;
     private JLabel statsLabel; // Live stats display
+    private JButton releaseBtn;
 
     // Thread Management
     private ExecutorService threadPool;
+    private final ExecutorService coordinatorPool = Executors.newSingleThreadExecutor();
+    private boolean turboMode = false;
+    private final Object batchLock = new Object();
     private final List<Future<?>> activeTasks = new ArrayList<>();
-    private static CountDownLatch gate = new CountDownLatch(1);
+    private RaceBatch currentBatch = RaceBatch.empty();
+    private RaceBatch.RaceAttempt currentAttempt;
+    private final AtomicLong nextBatchId = new AtomicLong(1);
+    private final AtomicInteger responseOrder = new AtomicInteger(0);
+    private final Map<Integer, ResponseFingerprint> baselineByRequestIndex = new ConcurrentHashMap<>();
 
-    // Metrics
-    private volatile long gateReleaseTime = 0;
-
-    // Clipboard Injection
+    // Request Mutation Controls
+    private JCheckBox bestEffortWarmUpToggle;
     private JCheckBox clipboardInjectionToggle;
+    private JCheckBox baselineToggle;
+    private JCheckBox multiEndpointModeToggle;
+    private JSpinner attemptsSpinner;
+    private JTextField keywordsField;
+    private JTextField successExpressionField;
 
     @Override
     public void initialize(MontoyaApi api) {
@@ -52,7 +69,7 @@ public class RaceConditionGate implements BurpExtension, ContextMenuItemsProvide
         api.extension().setName("Race Condition Gate (Ultimate)");
 
         // Initialize default Safe Pool
-        this.threadPool = Executors.newFixedThreadPool(20);
+        this.threadPool = Executors.newFixedThreadPool(SAFE_THREAD_LIMIT);
 
         SwingUtilities.invokeLater(() -> {
             // --- UI CONSTRUCTION ---
@@ -66,34 +83,65 @@ public class RaceConditionGate implements BurpExtension, ContextMenuItemsProvide
             table.getColumnModel().getColumn(0).setPreferredWidth(30); // ID
             table.getColumnModel().getColumn(4).setPreferredWidth(40); // Code
             table.getColumnModel().getColumn(5).setPreferredWidth(60); // Length
-            table.getColumnModel().getColumn(7).setPreferredWidth(80); // Offset
+            table.getColumnModel().getColumn(7).setPreferredWidth(110); // Dispatch offset
 
             // 2. Control Panel
-            JButton releaseBtn = new JButton("RELEASE ALL");
+            releaseBtn = new JButton("RELEASE ALL");
             releaseBtn.setBackground(new Color(255, 100, 100));
             releaseBtn.setForeground(Color.BLACK);
             releaseBtn.setFont(new Font("SansSerif", Font.BOLD, 14));
+            releaseBtn.setEnabled(false);
+            releaseBtn.setToolTipText("Thread-level release through Burp's HTTP stack; not last-byte or single-packet synchronization.");
 
             JButton clearBtn = new JButton("Clear / Reset");
 
             // Turbo Toggle
             JCheckBox turboToggle = new JCheckBox("Turbo Mode");
-            turboToggle.setToolTipText("Unchecked: Safe (20 threads). Checked: Unlimited threads (Fast, but risky).");
+            turboToggle.setToolTipText("Bounded 50-thread pool for larger batches; still thread-level synchronization.");
+
+            // Best-effort Warm-up Toggle
+            bestEffortWarmUpToggle = new JCheckBox("Best-effort warm-up");
+            bestEffortWarmUpToggle.setToolTipText("Optional HEAD / before the gate. May not reuse the same connection and creates extra target traffic.");
 
             // Clipboard Injection Toggle
             clipboardInjectionToggle = new JCheckBox("Inject Clipboard (%s)");
             clipboardInjectionToggle.setToolTipText("If checked, replaces '%s' in the request body with clipboard content.");
 
+            baselineToggle = new JCheckBox("Baseline");
+            baselineToggle.setToolTipText("Send the prepared requests sequentially before racing and compare race responses against that baseline.");
+
+            multiEndpointModeToggle = new JCheckBox("Multi-endpoint");
+            multiEndpointModeToggle.setToolTipText("Allow logical races across different endpoints. Leave off for precision batches.");
+
+            attemptsSpinner = new JSpinner(new SpinnerNumberModel(1, 1, 50, 1));
+            attemptsSpinner.setToolTipText("Number of race attempts to run. Later attempts auto-release once every worker is ready.");
+
+            keywordsField = new JTextField(14);
+            keywordsField.setToolTipText("Comma-separated keywords to count in each response body.");
+
+            successExpressionField = new JTextField(24);
+            successExpressionField.setToolTipText("Example: status == 200 and body contains \"redeemed\" and json $.balance changed");
+
             // Stats Label
             statsLabel = new JLabel("Stats: Waiting...");
             statsLabel.setFont(new Font("SansSerif", Font.BOLD, 12));
             statsLabel.setBorder(BorderFactory.createEmptyBorder(0, 20, 0, 0));
+            statsLabel.setToolTipText("Ready means worker threads completed any enabled best-effort warm-up and are waiting on the release latch.");
 
             JPanel buttonPanel = new JPanel(new FlowLayout(FlowLayout.LEFT));
             buttonPanel.add(releaseBtn);
             buttonPanel.add(clearBtn);
             buttonPanel.add(turboToggle);
+            buttonPanel.add(bestEffortWarmUpToggle);
             buttonPanel.add(clipboardInjectionToggle);
+            buttonPanel.add(new JLabel("Attempts"));
+            buttonPanel.add(attemptsSpinner);
+            buttonPanel.add(baselineToggle);
+            buttonPanel.add(multiEndpointModeToggle);
+            buttonPanel.add(new JLabel("Keywords"));
+            buttonPanel.add(keywordsField);
+            buttonPanel.add(new JLabel("Success"));
+            buttonPanel.add(successExpressionField);
             buttonPanel.add(statsLabel);
 
             // 3. Editors
@@ -106,10 +154,10 @@ public class RaceConditionGate implements BurpExtension, ContextMenuItemsProvide
                 if (!e.getValueIsAdjusting()) {
                     int selectedRow = table.getSelectedRow();
                     if (selectedRow != -1) {
-                        RaceResult result = tableModel.getResult(selectedRow);
-                        requestViewer.setRequest(result.request);
-                        if(result.response != null) {
-                            responseViewer.setResponse(result.response);
+                        RaceResultSnapshot result = tableModel.getResult(selectedRow);
+                        requestViewer.setRequest(result.request());
+                        if(result.response() != null) {
+                            responseViewer.setResponse(result.response());
                         } else {
                             responseViewer.setResponse(null);
                         }
@@ -122,7 +170,9 @@ public class RaceConditionGate implements BurpExtension, ContextMenuItemsProvide
 
             turboToggle.addActionListener(e -> {
                 swapThreadPool(turboToggle.isSelected());
-                api.logging().logToOutput("Switched to " + (turboToggle.isSelected() ? "Turbo Mode (Unlimited)" : "Safe Mode (20 Threads)"));
+                api.logging().logToOutput("Switched to "
+                        + (turboToggle.isSelected() ? "Turbo Mode (50 Threads)" : "Safe Mode (20 Threads)")
+                        + ". Synchronization remains thread-level through Burp's HTTP stack.");
             });
 
             // 5. Layout Assembly
@@ -142,6 +192,7 @@ public class RaceConditionGate implements BurpExtension, ContextMenuItemsProvide
         api.userInterface().registerContextMenuItemsProvider(this);
         api.extension().registerUnloadingHandler(() -> {
             if(threadPool != null) threadPool.shutdownNow();
+            coordinatorPool.shutdownNow();
         });
         api.logging().logToOutput("Race Gate Ultimate Loaded.");
     }
@@ -165,7 +216,7 @@ public class RaceConditionGate implements BurpExtension, ContextMenuItemsProvide
         JMenuItem item20 = new JMenuItem("Add 20 Requests");
         item20.addActionListener(l -> queueBatch(requestResponse, 20));
 
-        JMenuItem item50 = new JMenuItem("Add 50 Requests (Turbo Rec.)");
+        JMenuItem item50 = new JMenuItem("Add 50 Requests (Turbo Mode)");
         item50.addActionListener(l -> queueBatch(requestResponse, 50));
 
         parentMenu.add(item1);
@@ -176,7 +227,77 @@ public class RaceConditionGate implements BurpExtension, ContextMenuItemsProvide
     }
 
     private void queueBatch(HttpRequestResponse reqResp, int count) {
-        // If clipboard injection is enabled, get the clipboard content once for the batch
+        RaceBatch batch;
+        boolean bestEffortWarmUp = bestEffortWarmUpToggle.isSelected();
+        boolean baselineEnabled = baselineToggle.isSelected();
+        boolean multiEndpointMode = multiEndpointModeToggle.isSelected();
+        int totalAttempts = (Integer) attemptsSpinner.getValue();
+        List<String> keywords = ResponseAnalysis.splitCsv(keywordsField.getText());
+        String successExpressionText = successExpressionField.getText();
+        SuccessExpression successExpression = SuccessExpression.parse(successExpressionText);
+        List<String> jsonPaths = SuccessExpression.jsonPathsFromExpression(successExpressionText);
+        List<PreparedRaceRequest> preparedRequests = prepareRequests(reqResp, count);
+        TargetMetadata targetMetadata = TargetMetadata.from(preparedRequests.get(0).request());
+
+        synchronized (batchLock) {
+            int maxBatchSize = maxBatchSizeForCurrentMode();
+            if (count > maxBatchSize) {
+                String message = "Current mode supports up to " + maxBatchSize + " synchronized requests."
+                        + (turboMode ? "" : " Enable Turbo Mode for 50.");
+                api.logging().logToError(message);
+                if (statsLabel != null) {
+                    statsLabel.setText(message);
+                    statsLabel.setForeground(Color.RED);
+                }
+                return;
+            }
+
+            if (!currentBatch.isEmpty() && hasRunningTasksLocked()) {
+                String message = "Release or reset the current batch before queueing another one.";
+                api.logging().logToError(message);
+                if (statsLabel != null) {
+                    statsLabel.setText(message);
+                    statsLabel.setForeground(Color.RED);
+                }
+                return;
+            }
+
+            activeTasks.clear();
+            baselineByRequestIndex.clear();
+            responseOrder.set(0);
+            currentAttempt = null;
+            currentBatch = new RaceBatch(nextBatchId.getAndIncrement(), count, totalAttempts, targetMetadata, multiEndpointMode);
+            batch = currentBatch;
+        }
+
+        tableModel.clear();
+        for (int attempt = 1; attempt <= totalAttempts; attempt++) {
+            for (PreparedRaceRequest preparedRequest : preparedRequests) {
+                int id = tableModel.getRowCount() + 1;
+                tableModel.addResult(RaceResultSnapshot.queued(id, attempt, preparedRequest.requestIndex(), preparedRequest.request()));
+            }
+        }
+        requestViewer.setRequest(null);
+        responseViewer.setResponse(null);
+
+        Future<?> coordinator = coordinatorPool.submit(() -> runBatch(
+                batch,
+                preparedRequests,
+                bestEffortWarmUp,
+                baselineEnabled,
+                keywords,
+                jsonPaths,
+                successExpression
+        ));
+
+        synchronized (batchLock) {
+            activeTasks.add(coordinator);
+        }
+
+        updateStats();
+    }
+
+    private List<PreparedRaceRequest> prepareRequests(HttpRequestResponse reqResp, int count) {
         String[] payloads = null;
         if (clipboardInjectionToggle.isSelected()) {
             String clipboardContent = getClipboardContent();
@@ -186,13 +307,28 @@ public class RaceConditionGate implements BurpExtension, ContextMenuItemsProvide
             }
         }
 
+        List<PreparedRaceRequest> preparedRequests = new ArrayList<>();
         for(int i=0; i<count; i++) {
             String payload = null;
             if (payloads != null && payloads.length > 0) {
                 payload = payloads[i % payloads.length];
             }
-            queueRequest(reqResp, payload);
+            preparedRequests.add(new PreparedRaceRequest(i + 1, applyPayload(reqResp.request(), payload)));
         }
+        return List.copyOf(preparedRequests);
+    }
+
+    private int maxBatchSizeForCurrentMode() {
+        return turboMode ? TURBO_THREAD_LIMIT : SAFE_THREAD_LIMIT;
+    }
+
+    private boolean hasRunningTasksLocked() {
+        for (Future<?> task : activeTasks) {
+            if (!task.isDone()) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private String getClipboardContent() {
@@ -207,11 +343,7 @@ public class RaceConditionGate implements BurpExtension, ContextMenuItemsProvide
         return null;
     }
 
-    // --- CORE LOGIC ---
-    private void queueRequest(HttpRequestResponse reqResp, String payload) {
-        HttpRequest requestToSend = reqResp.request();
-
-        // Inject payload if available and placeholder exists
+    private HttpRequest applyPayload(HttpRequest requestToSend, String payload) {
         if (payload != null && !payload.isEmpty()) {
             String body = requestToSend.bodyToString();
             if (body.contains("%s")) {
@@ -219,75 +351,221 @@ public class RaceConditionGate implements BurpExtension, ContextMenuItemsProvide
                 requestToSend = requestToSend.withBody(newBody);
             }
         }
+        return requestToSend;
+    }
 
-        RaceResult result = new RaceResult(requestToSend);
-        int rowId = tableModel.addResult(result);
+    // --- CORE LOGIC ---
+    private void runBatch(
+            RaceBatch batch,
+            List<PreparedRaceRequest> preparedRequests,
+            boolean bestEffortWarmUp,
+            boolean baselineEnabled,
+            List<String> keywords,
+            List<String> jsonPaths,
+            SuccessExpression successExpression
+    ) {
+        try {
+            if (baselineEnabled && !batch.isCancelled()) {
+                updateStatsText("Running sequential baseline for batch " + batch.batchId() + "...");
+                runSequentialBaseline(batch, preparedRequests, keywords, jsonPaths);
+            }
 
-        // Capture final request for lambda
-        HttpRequest finalRequestToSend = requestToSend;
+            for (int attemptNumber = 1; attemptNumber <= batch.totalAttempts() && !batch.isCancelled(); attemptNumber++) {
+                RaceBatch.RaceAttempt attempt = batch.attempt(attemptNumber);
+                synchronized (batchLock) {
+                    currentAttempt = attempt;
+                }
 
-        Future<?> task = threadPool.submit(() -> {
-            try {
-                // 1. SMART WARMER
-                // Clone request, strip body, use HEAD, force Keep-Alive
+                for (PreparedRaceRequest preparedRequest : preparedRequests) {
+                    int rowId = rowIdFor(attemptNumber, preparedRequest.requestIndex(), batch.expectedWorkerCount());
+                    Future<?> worker = threadPool.submit(() -> executeRaceRequest(
+                            batch,
+                            attempt,
+                            preparedRequest,
+                            rowId,
+                            bestEffortWarmUp,
+                            keywords,
+                            jsonPaths,
+                            successExpression
+                    ));
+                    synchronized (batchLock) {
+                        activeTasks.add(worker);
+                    }
+                }
+
+                attempt.awaitReady();
+                updateStats();
+                if (attemptNumber > 1) {
+                    attempt.release();
+                    updateStats();
+                }
+                attempt.awaitCompletion();
+                summarizeAttempt(batch, attempt);
+            }
+        } catch (InterruptedException e) {
+            batch.cancel();
+            Thread.currentThread().interrupt();
+            updateStatsText("Batch cancelled.");
+        } catch (Exception e) {
+            batch.cancel();
+            api.logging().logToError("Batch failed: " + e.getMessage());
+            updateStatsText("Batch failed: " + e.getMessage());
+        } finally {
+            synchronized (batchLock) {
+                if (currentBatch == batch) {
+                    currentAttempt = null;
+                }
+            }
+            updateStats();
+        }
+    }
+
+    private void runSequentialBaseline(
+            RaceBatch batch,
+            List<PreparedRaceRequest> preparedRequests,
+            List<String> keywords,
+            List<String> jsonPaths
+    ) {
+        for (PreparedRaceRequest preparedRequest : preparedRequests) {
+            if (batch.isCancelled()) {
+                return;
+            }
+
+            long start = System.nanoTime();
+            HttpRequestResponse response = api.http().sendRequest(preparedRequest.request());
+            long responseTimeUs = (System.nanoTime() - start) / 1000;
+            ResponseFingerprint fingerprint = ResponseAnalysis.fingerprint(response.response(), responseTimeUs, 0, keywords, jsonPaths);
+            baselineByRequestIndex.put(preparedRequest.requestIndex(), fingerprint);
+        }
+    }
+
+    private void executeRaceRequest(
+            RaceBatch batch,
+            RaceBatch.RaceAttempt attempt,
+            PreparedRaceRequest preparedRequest,
+            int rowId,
+            boolean bestEffortWarmUp,
+            List<String> keywords,
+            List<String> jsonPaths,
+            SuccessExpression successExpression
+    ) {
+        try {
+            HttpRequest finalRequestToSend = preparedRequest.request();
+            if (!batch.isCompatible(TargetMetadata.from(finalRequestToSend))) {
+                updateTableSnapshot(rowId, snapshot -> snapshot.withStatus("Error: incompatible target"));
+                batch.cancel();
+                return;
+            }
+
+            updateTableSnapshot(rowId, snapshot -> snapshot.withStatus(bestEffortWarmUp ? "Warming" : "Preparing"));
+
+            if (bestEffortWarmUp) {
                 HttpRequest warmer = finalRequestToSend
                         .withMethod("HEAD")
                         .withPath("/")
-                        .withBody(ByteArray.byteArray())
-                        .withHeader("Connection", "keep-alive");
+                        .withBody(ByteArray.byteArray());
 
-                // Send warmer to open socket
-                api.http().sendRequest(warmer);
-
-                // 2. WAIT AT GATE
-                gate.await();
-
-                // 3. CAPTURE JITTER (OFFSET)
-                long myStartTime = System.nanoTime();
-                long offset = (myStartTime - gateReleaseTime) / 1000; // microseconds
-
-                // 4. EXECUTE RACE
-                HttpRequestResponse response = api.http().sendRequest(finalRequestToSend);
-                long endTime = System.nanoTime();
-
-                // 5. RECORD RESULTS
-                result.request = finalRequestToSend; // Update request in result to reflect injection
-                result.response = response.response();
-                result.status = "Done";
-                result.statusCode = response.response().statusCode();
-                result.length = response.response().body().length();
-                result.timeTakenUs = (endTime - myStartTime) / 1000;
-                result.offsetUs = offset;
-
-                updateTableSafe(rowId);
-
-            } catch (InterruptedException e) {
-                result.status = "Cancelled";
-                Thread.currentThread().interrupt();
-                updateTableSafe(rowId);
-            } catch (Exception e) {
-                result.status = "Error: " + e.getMessage();
-                updateTableSafe(rowId);
+                try {
+                    api.http().sendRequest(warmer);
+                } catch (Exception warmUpFailure) {
+                    api.logging().logToError("Best-effort warm-up failed for row " + (rowId + 1) + ": " + warmUpFailure.getMessage());
+                }
             }
-        });
 
-        activeTasks.add(task);
-        updateStats(); // Update pending count
+            if (!markWorkerReady(batch, attempt, rowId)) {
+                return;
+            }
+
+            attempt.awaitRelease();
+            if (!attempt.wasReleasedByBatch()) {
+                updateTableSnapshot(rowId, snapshot -> snapshot.withStatus("Cancelled"));
+                return;
+            }
+
+            long myStartTime = System.nanoTime();
+            long dispatchOffset = (myStartTime - attempt.releaseTimeNanos()) / 1000;
+
+            HttpRequestResponse response = api.http().sendRequest(finalRequestToSend);
+            long responseTimeUs = (System.nanoTime() - myStartTime) / 1000;
+            int order = responseOrder.incrementAndGet();
+            ResponseFingerprint fingerprint = ResponseAnalysis.fingerprint(response.response(), responseTimeUs, order, keywords, jsonPaths);
+            ResponseFingerprint baseline = baselineByRequestIndex.get(preparedRequest.requestIndex());
+            String body = response.response().bodyToString();
+            boolean successMatched = successExpression.matches(fingerprint, baseline, body);
+            String anomaly = ResponseAnalysis.summarizeDifference(baseline, fingerprint, successMatched);
+
+            updateTableSnapshot(rowId, snapshot -> snapshot.completed(response.response(), fingerprint, responseTimeUs, dispatchOffset, anomaly));
+        } catch (InterruptedException e) {
+            updateTableSnapshot(rowId, snapshot -> snapshot.withStatus("Cancelled"));
+            Thread.currentThread().interrupt();
+        } catch (Exception e) {
+            updateTableSnapshot(rowId, snapshot -> snapshot.withStatus("Error: " + e.getMessage()));
+        } finally {
+            attempt.markComplete();
+            updateStats();
+        }
+    }
+
+    private void summarizeAttempt(RaceBatch batch, RaceBatch.RaceAttempt attempt) {
+        SwingUtilities.invokeLater(() -> {
+            int anomalies = 0;
+            int successMatches = 0;
+            for (int i = 0; i < tableModel.getRowCount(); i++) {
+                RaceResultSnapshot snapshot = tableModel.getResult(i);
+                if (snapshot.attempt() == attempt.attemptNumber() && !snapshot.anomaly().isBlank()) {
+                    anomalies++;
+                    if (snapshot.anomaly().contains("success expression matched")) {
+                        successMatches++;
+                    }
+                }
+            }
+
+            String summary = "Batch " + batch.batchId()
+                    + " attempt " + attempt.attemptNumber() + "/" + batch.totalAttempts()
+                    + ": " + anomalies + " anomalous responses"
+                    + (successMatches > 0 ? ", " + successMatches + " success-expression matches" : "");
+            api.logging().logToOutput(summary);
+            statsLabel.setText(summary);
+        });
+    }
+
+    private int rowIdFor(int attemptNumber, int requestIndex, int expectedWorkerCount) {
+        return (attemptNumber - 1) * expectedWorkerCount + requestIndex - 1;
     }
 
     private void releaseGate() {
-        if (activeTasks.isEmpty()) return;
-        api.logging().logToOutput("Releasing gate for " + activeTasks.size() + " requests!");
-        gateReleaseTime = System.nanoTime();
-        gate.countDown();
+        RaceBatch.RaceAttempt attempt;
+        synchronized (batchLock) {
+            attempt = currentAttempt;
+            if (attempt == null || attempt.isReleased()) return;
+
+            if (!attempt.isReadyToRelease()) {
+                api.logging().logToError("Release blocked: Ready " + attempt.readyCount() + "/" + attempt.expectedWorkerCount());
+                updateStats();
+                return;
+            }
+
+            api.logging().logToOutput("Releasing attempt " + attempt.attemptNumber() + " for "
+                    + attempt.expectedWorkerCount() + " ready requests!");
+            attempt.release();
+        }
+        updateStats();
     }
 
     private void resetGate() {
-        gate = new CountDownLatch(1);
-        for(Future<?> task : activeTasks) {
-            if(!task.isDone()) task.cancel(true);
+        RaceBatch oldBatch;
+        synchronized (batchLock) {
+            oldBatch = currentBatch;
+            currentBatch = RaceBatch.empty();
+            currentAttempt = null;
+
+            for(Future<?> task : activeTasks) {
+                if(!task.isDone()) task.cancel(true);
+            }
+            activeTasks.clear();
         }
-        activeTasks.clear();
+
+        oldBatch.cancel();
         tableModel.clear();
         requestViewer.setRequest(null);
         responseViewer.setResponse(null);
@@ -296,21 +574,42 @@ public class RaceConditionGate implements BurpExtension, ContextMenuItemsProvide
 
     private synchronized void swapThreadPool(boolean turboMode) {
         if (threadPool != null) threadPool.shutdownNow();
+        this.turboMode = turboMode;
 
         if (turboMode) {
-            threadPool = Executors.newCachedThreadPool(); // Unlimited
+            threadPool = Executors.newFixedThreadPool(TURBO_THREAD_LIMIT); // Bounded
         } else {
-            threadPool = Executors.newFixedThreadPool(20); // Safe
+            threadPool = Executors.newFixedThreadPool(SAFE_THREAD_LIMIT); // Safe
         }
         resetGate();
     }
 
+    private boolean markWorkerReady(RaceBatch batch, RaceBatch.RaceAttempt attempt, int rowId) {
+        synchronized (batchLock) {
+            if (batch != currentBatch || !attempt.markReady()) {
+                updateTableSnapshot(rowId, snapshot -> snapshot.withStatus("Cancelled"));
+                return false;
+            }
+        }
+
+        updateTableSnapshot(rowId, snapshot -> snapshot.withStatus("Ready"));
+        return true;
+    }
+
     // --- UI HELPERS ---
-    private void updateTableSafe(int rowId) {
+    private void updateTableSnapshot(int rowId, UnaryOperator<RaceResultSnapshot> updater) {
         SwingUtilities.invokeLater(() -> {
             if (rowId < tableModel.getRowCount()) {
-                tableModel.fireTableRowsUpdated(rowId, rowId);
+                tableModel.updateResult(rowId, updater.apply(tableModel.getResult(rowId)));
                 updateStats();
+            }
+        });
+    }
+
+    private void updateStatsText(String text) {
+        SwingUtilities.invokeLater(() -> {
+            if (statsLabel != null) {
+                statsLabel.setText(text);
             }
         });
     }
@@ -318,20 +617,56 @@ public class RaceConditionGate implements BurpExtension, ContextMenuItemsProvide
     private void updateStats() {
         SwingUtilities.invokeLater(() -> {
             Map<Short, Integer> counts = new TreeMap<>();
-            int pending = 0;
+            int failed = 0;
             int completed = 0;
+            int anomalies = 0;
 
             for (int i = 0; i < tableModel.getRowCount(); i++) {
-                RaceResult result = tableModel.getResult(i);
-                if ("Done".equals(result.status)) {
+                RaceResultSnapshot result = tableModel.getResult(i);
+                if ("Done".equals(result.status())) {
                     completed++;
-                    counts.put(result.statusCode, counts.getOrDefault(result.statusCode, 0) + 1);
-                } else {
-                    pending++;
+                    counts.put(result.statusCode(), counts.getOrDefault(result.statusCode(), 0) + 1);
+                    if (!result.anomaly().isBlank()) {
+                        anomalies++;
+                    }
+                } else if (result.status().startsWith("Error") || "Cancelled".equals(result.status())) {
+                    failed++;
                 }
             }
 
-            StringBuilder sb = new StringBuilder("Done: " + completed + "/" + (completed + pending) + "  |  ");
+            int readyCount;
+            int expectedCount;
+            boolean released;
+            boolean releaseEnabled;
+            int attemptNumber;
+            int totalAttempts;
+            synchronized (batchLock) {
+                RaceBatch.RaceAttempt attempt = currentAttempt;
+                readyCount = attempt == null ? 0 : attempt.readyCount();
+                expectedCount = attempt == null ? 0 : attempt.expectedWorkerCount();
+                released = attempt != null && attempt.isReleased();
+                releaseEnabled = attempt != null && attempt.isReadyToRelease();
+                attemptNumber = attempt == null ? 0 : attempt.attemptNumber();
+                totalAttempts = currentBatch.isEmpty() ? 0 : currentBatch.totalAttempts();
+            }
+
+            StringBuilder sb = new StringBuilder();
+            if (attemptNumber > 0) {
+                sb.append("Attempt: ").append(attemptNumber).append("/").append(totalAttempts).append("  |  ");
+            }
+            sb.append("Ready: ").append(readyCount).append("/").append(expectedCount);
+            if (released) {
+                sb.append("  |  Released");
+            }
+            sb.append("  |  Done: ").append(completed).append("/").append(tableModel.getRowCount());
+            if (anomalies > 0) {
+                sb.append("  |  Anomalies: ").append(anomalies);
+            }
+            if (failed > 0) {
+                sb.append("  |  Failed: ").append(failed);
+            }
+            sb.append("  |  ");
+
             if (counts.isEmpty()) {
                 sb.append("Waiting...");
             } else {
@@ -339,6 +674,9 @@ public class RaceConditionGate implements BurpExtension, ContextMenuItemsProvide
             }
 
             statsLabel.setText(sb.toString());
+            if (releaseBtn != null) {
+                releaseBtn.setEnabled(releaseEnabled);
+            }
 
             // Visual Alert for anomalies (500s or mixed 200/403)
             if (counts.containsKey((short)500) || counts.containsKey((short)503)) {
@@ -353,15 +691,32 @@ public class RaceConditionGate implements BurpExtension, ContextMenuItemsProvide
 
     // --- DATA MODELS ---
     static class RaceTableModel extends AbstractTableModel {
-        private final List<RaceResult> results = new ArrayList<>();
-        private final String[] columns = {"ID", "Method", "URL", "Status", "Code", "Length", "Time (us)", "Offset (us)"};
+        private final List<RaceResultSnapshot> results = new ArrayList<>();
+        private final String[] columns = {
+                "ID",
+                "Attempt",
+                "Method",
+                "URL",
+                "Status",
+                "Code",
+                "Length",
+                "Time (us)",
+                "Dispatch Offset (us)",
+                "Body Hash",
+                "Order",
+                "Anomaly"
+        };
 
-        public int addResult(RaceResult result) {
+        public int addResult(RaceResultSnapshot result) {
             results.add(result);
             int idx = results.size() - 1;
-            result.id = idx + 1;
             fireTableRowsInserted(idx, idx);
             return idx;
+        }
+
+        public void updateResult(int rowIndex, RaceResultSnapshot result) {
+            results.set(rowIndex, result);
+            fireTableRowsUpdated(rowIndex, rowIndex);
         }
 
         public void clear() {
@@ -369,38 +724,29 @@ public class RaceConditionGate implements BurpExtension, ContextMenuItemsProvide
             fireTableDataChanged();
         }
 
-        public RaceResult getResult(int rowIndex) { return results.get(rowIndex); }
+        public RaceResultSnapshot getResult(int rowIndex) { return results.get(rowIndex); }
         @Override public int getRowCount() { return results.size(); }
         @Override public int getColumnCount() { return columns.length; }
         @Override public String getColumnName(int column) { return columns[column]; }
         @Override public Object getValueAt(int rowIndex, int columnIndex) {
-            RaceResult r = results.get(rowIndex);
+            RaceResultSnapshot r = results.get(rowIndex);
             return switch (columnIndex) {
-                case 0 -> r.id;
-                case 1 -> r.request.method();
-                case 2 -> r.request.url();
-                case 3 -> r.status;
-                case 4 -> (r.statusCode == 0) ? "" : r.statusCode;
-                case 5 -> (r.status.equals("Done")) ? r.length : "";
-                case 6 -> (r.timeTakenUs == 0) ? "" : r.timeTakenUs;
-                case 7 -> (r.status.equals("Done")) ? r.offsetUs : "";
+                case 0 -> r.id();
+                case 1 -> r.attempt();
+                case 2 -> r.request().method();
+                case 3 -> r.request().url();
+                case 4 -> r.status();
+                case 5 -> (r.statusCode() == 0) ? "" : r.statusCode();
+                case 6 -> (r.status().equals("Done")) ? r.length() : "";
+                case 7 -> (r.timeTakenUs() == 0) ? "" : r.timeTakenUs();
+                case 8 -> (r.status().equals("Done")) ? r.dispatchOffsetUs() : "";
+                case 9 -> r.bodyHash();
+                case 10 -> (r.responseOrder() == 0) ? "" : r.responseOrder();
+                case 11 -> r.anomaly();
                 default -> "";
             };
         }
     }
 
-    static class RaceResult {
-        int id;
-        HttpRequest request;
-        HttpResponse response;
-        String status = "Queued";
-        short statusCode = 0;
-        int length = 0;
-        long timeTakenUs = 0;
-        long offsetUs = 0;
-
-        public RaceResult(HttpRequest request) {
-            this.request = request;
-        }
-    }
+    private record PreparedRaceRequest(int requestIndex, HttpRequest request) {}
 }
