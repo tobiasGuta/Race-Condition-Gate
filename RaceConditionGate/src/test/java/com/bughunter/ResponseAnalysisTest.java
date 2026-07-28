@@ -97,7 +97,7 @@ class ResponseAnalysisTest {
     }
 
     @Test
-    void clusterResponsesMarksMinorityResponseFamilies() {
+    void clusterResponsesMarksEightTwoAsMinorityCluster() {
         ResponseFingerprint conflict = new ResponseFingerprint(
                 (short) 409,
                 80,
@@ -138,9 +138,57 @@ class ResponseAnalysisTest {
         assertEquals("B", clusters.get(1).label());
         assertEquals(2, clusters.get(1).count());
         assertTrue(clusters.get(1).minority());
+        assertTrue(clusters.get(1).divergent());
         assertTrue(summary.contains("Cluster A: 18 responses - 409 - len 80 - hash a23e91"));
         assertTrue(summary.contains("Cluster B: 2 responses - 200 - len 120 - hash 42d1fe"));
         assertTrue(summary.contains("minority cluster"));
+    }
+
+    @Test
+    void clusterResponsesMarksOneOneAsSplitResponseFamily() {
+        var clusters = ResponseAnalysis.clusterResponses(List.of(
+                fingerprint((short) 200, 10, "success"),
+                fingerprint((short) 409, 10, "conflict")
+        ));
+
+        assertEquals(2, clusters.size());
+        assertTrue(clusters.get(0).divergent());
+        assertTrue(clusters.get(1).divergent());
+        assertFalse(clusters.get(0).minority());
+        assertTrue(ResponseAnalysis.summarizeClusters(clusters).contains("split response family"));
+        assertTrue(clusters.get(0).anomalySummary(2).contains("split response family"));
+    }
+
+    @Test
+    void clusterResponsesMarksFiveFiveAsSplitResponseFamily() {
+        var fingerprints = new java.util.ArrayList<ResponseFingerprint>();
+        for (int i = 0; i < 5; i++) {
+            fingerprints.add(fingerprint((short) 200, 10, "success"));
+            fingerprints.add(fingerprint((short) 409, 10, "conflict"));
+        }
+
+        var clusters = ResponseAnalysis.clusterResponses(fingerprints);
+
+        assertEquals(2, clusters.size());
+        assertEquals(5, clusters.get(0).count());
+        assertEquals(5, clusters.get(1).count());
+        assertTrue(clusters.get(0).divergent());
+        assertTrue(clusters.get(1).divergent());
+        assertTrue(ResponseAnalysis.summarizeClusters(clusters).contains("split response family"));
+    }
+
+    @Test
+    void clusterResponsesMarksAllUniqueAsHighlyDivergent() {
+        var clusters = ResponseAnalysis.clusterResponses(List.of(
+                fingerprint((short) 200, 10, "success"),
+                fingerprint((short) 409, 11, "conflict"),
+                fingerprint((short) 500, 12, "error")
+        ));
+
+        assertEquals(3, clusters.size());
+        assertTrue(clusters.stream().allMatch(ResponseAnalysis.AttemptResponseCluster::divergent));
+        assertTrue(ResponseAnalysis.summarizeClusters(clusters).contains("highly divergent"));
+        assertTrue(clusters.get(0).anomalySummary(3).contains("highly divergent cluster"));
     }
 
     @Test
@@ -162,6 +210,27 @@ class ResponseAnalysisTest {
     }
 
     @Test
+    void splitLinesPreservesRegexCommas() {
+        assertEquals(List.of("\\d{1,3}"), ResponseAnalysis.splitLines("\\d{1,3}"));
+    }
+
+    @Test
+    void splitLinesAcceptsOneRegexPerLine() {
+        assertEquals(
+                List.of("\\d{1,3}", "\"requestId\":\"[^\"]+\""),
+                ResponseAnalysis.splitLines("\\d{1,3}\n\"requestId\":\"[^\"]+\"")
+        );
+    }
+
+    @Test
+    void utf8ByteLengthCountsBytesNotJavaChars() {
+        String body = "\u00e9\u4e2d";
+
+        assertEquals(2, body.length());
+        assertEquals(5, ResponseAnalysis.utf8ByteLength(body));
+    }
+
+    @Test
     void ignoredHeadersAndSetCookieAreExcludedByNormalizationPolicy() {
         ResponseNormalization normalization = new ResponseNormalization(
                 Set.of("location"),
@@ -177,5 +246,9 @@ class ResponseAnalysisTest {
 
     private static ResponseFingerprint fingerprint(short status, Map<String, String> headers, Map<String, String> jsonFields) {
         return new ResponseFingerprint(status, 0, "hash", headers, Map.of(), jsonFields, headers.getOrDefault("location", ""), 0, 0);
+    }
+
+    private static ResponseFingerprint fingerprint(short status, int length, String hash) {
+        return new ResponseFingerprint(status, length, hash, Map.of(), Map.of(), Map.of(), "", 0, 0);
     }
 }

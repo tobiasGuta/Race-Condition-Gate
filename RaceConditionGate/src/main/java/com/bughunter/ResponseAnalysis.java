@@ -61,7 +61,7 @@ final class ResponseAnalysis {
 
         return new ResponseFingerprint(
                 response.statusCode(),
-                normalizedBody.length(),
+                utf8ByteLength(normalizedBody),
                 sha256(normalizedBody),
                 selectedHeaders,
                 keywordCounts,
@@ -140,6 +140,11 @@ final class ResponseAnalysis {
                 .mapToInt(List::size)
                 .max()
                 .orElse(0);
+        long largestClusterCount = grouped.values().stream()
+                .filter(group -> group.size() == maxCount)
+                .count();
+        boolean allUnique = grouped.size() == fingerprints.size() && grouped.size() > 2;
+        boolean splitLargest = grouped.size() > 1 && largestClusterCount > 1;
 
         List<Map.Entry<ClusterKey, List<ResponseFingerprint>>> entries = new ArrayList<>(grouped.entrySet());
         entries.sort(
@@ -157,10 +162,32 @@ final class ResponseAnalysis {
                     clusterLabel(i),
                     entry.getValue().size(),
                     entry.getKey(),
-                    grouped.size() > 1 && entry.getValue().size() < maxCount
+                    clusterRole(grouped.size(), entry.getValue().size(), maxCount, allUnique, splitLargest)
             ));
         }
         return List.copyOf(clusters);
+    }
+
+    private static ClusterRole clusterRole(
+            int clusterCount,
+            int count,
+            int maxCount,
+            boolean allUnique,
+            boolean splitLargest
+    ) {
+        if (clusterCount <= 1) {
+            return ClusterRole.NORMAL;
+        }
+        if (allUnique) {
+            return ClusterRole.HIGHLY_DIVERGENT;
+        }
+        if (splitLargest) {
+            return ClusterRole.SPLIT_RESPONSE_FAMILY;
+        }
+        if (count < maxCount) {
+            return ClusterRole.MINORITY;
+        }
+        return ClusterRole.NORMAL;
     }
 
     static String summarizeClusters(List<AttemptResponseCluster> clusters) {
@@ -184,20 +211,23 @@ final class ResponseAnalysis {
         return values;
     }
 
-    static List<String> splitLinesOrCsv(String text) {
+    static List<String> splitLines(String text) {
         if (text == null || text.isBlank()) {
             return List.of();
         }
 
-        String delimiter = text.contains("\n") || text.contains("\r") ? "\\R" : ",";
         List<String> values = new ArrayList<>();
-        for (String part : text.split(delimiter)) {
+        for (String part : text.split("\\R")) {
             String trimmed = part.trim();
             if (!trimmed.isEmpty()) {
                 values.add(trimmed);
             }
         }
         return values;
+    }
+
+    static int utf8ByteLength(String value) {
+        return value.getBytes(StandardCharsets.UTF_8).length;
     }
 
     static String extractJsonValue(String body, String jsonPath) {
@@ -328,8 +358,16 @@ final class ResponseAnalysis {
             String label,
             int count,
             ClusterKey key,
-            boolean minority
+            ClusterRole role
     ) {
+        boolean divergent() {
+            return role != ClusterRole.NORMAL;
+        }
+
+        boolean minority() {
+            return role == ClusterRole.MINORITY;
+        }
+
         String summary() {
             StringBuilder sb = new StringBuilder()
                     .append("Cluster ").append(label)
@@ -340,17 +378,40 @@ final class ResponseAnalysis {
             if (!key.headers().isEmpty()) {
                 sb.append(" - headers ").append(key.headers());
             }
-            if (minority) {
-                sb.append(" - minority cluster");
+            if (divergent()) {
+                sb.append(" - ").append(role.summaryLabel());
             }
             return sb.toString();
         }
 
         String anomalySummary(int totalResponses) {
-            return "minority cluster " + label
+            return role.anomalyLabel() + " " + label
                     + " (" + count + "/" + totalResponses
                     + "; status " + key.statusCode()
                     + "; hash " + key.bodyHash() + ")";
+        }
+    }
+
+    enum ClusterRole {
+        NORMAL("normal cluster", "normal cluster"),
+        MINORITY("minority cluster", "minority cluster"),
+        SPLIT_RESPONSE_FAMILY("split response family", "split response family"),
+        HIGHLY_DIVERGENT("highly divergent", "highly divergent cluster");
+
+        private final String summaryLabel;
+        private final String anomalyLabel;
+
+        ClusterRole(String summaryLabel, String anomalyLabel) {
+            this.summaryLabel = summaryLabel;
+            this.anomalyLabel = anomalyLabel;
+        }
+
+        String summaryLabel() {
+            return summaryLabel;
+        }
+
+        String anomalyLabel() {
+            return anomalyLabel;
         }
     }
 

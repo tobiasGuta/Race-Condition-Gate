@@ -31,17 +31,17 @@ The current project dependency is Montoya API `2023.12.1`, so this implementatio
 
 ### 3. Workflow Efficiency
 * **Editable Batch Queueing:** The context menu queues **1, 10, 20, or 50 requests** without immediately starting workers. You can add multiple requests, including different endpoints when Multi-endpoint mode is enabled, then freeze the queue with **ARM BATCH**. The 50-request option requires Turbo mode.
-* **Repeated Attempts:** The attempts control supports runs such as `20 requests x 10 attempts`. By default, every attempt waits for a manual release so the tester can restore target state between attempts. An explicit auto-release toggle can release later attempts automatically once every worker is ready.
-* **Baseline Modes:** Baseline defaults to **No baseline**. **Single-request baseline** sends one control request. **Full baseline (destructive)** sends every queued request sequentially before racing and requires confirmation because it can consume one-time application state.
-* **Attempt-Level Clustering:** Every completed attempt groups responses by status, body hash, response length, and selected headers. Minority response families are marked as anomalies even when baseline mode is disabled.
-* **Noise Normalization:** Ignore noisy headers, suppress `Set-Cookie`, redact JSON fields, and replace body regex matches before response length/hash comparison and clustering.
-* **Response Memory Limits:** Batches are capped at 500 request operations, with a warning above 200. Ordinary rows retain fingerprints and metadata only; full responses are retained for anomalous rows only when the body is within the configured maximum.
+* **Repeated Attempts:** The attempts control supports runs such as `20 requests x 10 attempts`. By default, every attempt waits for a manual release so the tester can manually restore target state between attempts. An explicit auto-release toggle can release later attempts automatically once every worker is ready.
+* **Baseline Modes:** Baseline defaults to **No baseline**. **Single control request - may mutate state** sends one control request and shares that fingerprint with queued requests that have an identical method, URL, and body. Unsafe methods such as POST require confirmation. **Full baseline (destructive)** sends every queued request sequentially before racing and requires confirmation because it can consume one-time application state.
+* **Attempt-Level Clustering:** Every completed attempt groups responses by status, body hash, response length, and selected headers. Minority clusters, equal split response families, and highly divergent all-unique attempts are marked as anomalies even when baseline mode is disabled.
+* **Noise Normalization:** Ignore noisy headers, suppress `Set-Cookie`, redact JSON fields, and replace body regex matches before response length/hash comparison and clustering. Body normalization regexes are entered one per line.
+* **Response Memory Limits:** Batches are capped at 500 request operations, with a warning above 200. Full-response retention is capped at 1 MB per response and 32 MB per attempt. The extension keeps metadata for every row, then retains only budgeted full-response representatives for response families and success-expression matches.
 * **Validated Success Expressions:** A simple `and` expression can flag interesting responses, for example `status == 200 and body contains "redeemed" and json $.balance changed`. Invalid terms are rejected before the batch is armed, and custom `header ... contains ...` terms are collected for matching.
 * **Legacy Compatibility:** Custom HTTP request construction ensures full compatibility with older versions of the Montoya API (2023.12.1+).
 
 ### 4. Dedicated UI Dashboard
-* **Queue Table:** A clear table showing every queued request, its attempt, method, and URL.
-* **Real-Time Feedback:** The UI reports active attempt readiness before release, then updates each row with attempt number, status code, length, timing, thread dispatch offset, body hash, response order, and anomaly summary.
+* **Queue Table:** A clear table showing every queued request, its attempt, method, URL, status, normalized UTF-8 byte length, timing, response family hash, response order, and anomaly notes. Before arming, staged requests can be removed, duplicated, moved up/down, or cleared.
+* **Real-Time Feedback:** The UI reports active attempt readiness before release, then updates each row with attempt number, status code, normalized UTF-8 byte length, timing, thread dispatch offset, body hash, response order, and anomaly summary.
 * **Split-View Analysis:** Click any row to see the exact **Request** sent and **Response** received in a side-by-side view.
 * **Safe Reset:** A "Clear / Reset" button cancels all pending tasks and wipes the slate clean safely.
 
@@ -72,11 +72,12 @@ The current project dependency is Montoya API `2023.12.1`, so this implementatio
 2.  **Queue the Attack:**
     * Right-click the request -> **Race Gate Queue**.
     * Select **Queue 10 Requests** (or your desired amount).
+    * Use **Remove**, **Duplicate**, **Up**, **Down**, or **Clear Queue** to edit staged requests before arming.
     * For multi-endpoint races, repeat this from additional requests, then enable **Multi-endpoint** before arming.
     * Optionally enable **Best-effort warm-up** if extra `HEAD /` traffic is acceptable for the target and test plan.
     * Optionally choose a safe **Baseline** mode, set **Attempts**, configure comma-separated **Keywords**, and add a **Success** expression.
     * Configure noise controls for dynamic response values such as timestamps, request IDs, CSRF tokens, analytics IDs, or session cookies.
-    * Set **Max body KB** to control how large an anomalous response body may be before the extension stores metadata only.
+    * Set **Max body KB** to control how large a representative or success-match response body may be before the extension stores metadata only. The control is capped at 1 MB per response, with a 32 MB total retained-response budget per attempt.
     * Set **Ready timeout** to bound how long the coordinator waits for every worker to finish warm-up/preparation and reach the gate.
     * Leave **Auto-release attempts** unchecked when target state must be restored between attempts.
 3.  **Execute:**
@@ -111,12 +112,13 @@ https://github.com/user-attachments/assets/273b21bf-189f-454e-9e8c-6b75cba56d70
 * The optional warm-up request is separate from the race request; Burp may select a different connection for the real request.
 * The optional warm-up request can trigger WAF, rate-limit, logging, routing, or authentication-side behavior.
 * The optional warm-up does not attempt to force connection reuse with the HTTP/1.1 `Connection` header because that would not provide meaningful HTTP/2 connection control.
-* Baseline requests are real target requests. Use **No baseline** or **Single-request baseline** for one-time actions such as coupon redemption, withdrawals, transfers, account changes, or order state transitions.
-* Repeated attempts can mutate the same target state repeatedly. Keep automatic attempt release disabled unless the test plan includes disposable state or a reliable reset workflow.
-* Body regex normalization is intentionally simple replacement before hashing. Invalid regexes are rejected when arming the batch.
+* Baseline requests are real target requests. Use **No baseline** for one-time actions such as coupon redemption, withdrawals, transfers, account changes, or order state transitions unless the target state is disposable. The single control request mode still mutates state when used with unsafe methods.
+* Repeated attempts can mutate the same target state repeatedly. Keep automatic attempt release disabled unless the test plan includes disposable state or manual state restoration between attempts.
+* Automated reset requests or reset hooks between attempts are not implemented yet. A future workflow could let the user stage a dedicated non-gated reset request that runs between attempts.
+* Body regex normalization is intentionally simple replacement before hashing. Enter one regex per line; commas are treated as regex text, not separators. Invalid regexes are rejected when arming the batch.
 * Success expressions support `status == 200`, `status != 409`, `body contains "text"`, `body not contains "text"`, `header Name contains "text"`, `json $.field == value`, and `json $.field changed`. Unknown terms such as `stats == 200` are rejected before execution.
-* Full response bodies are intentionally not retained for ordinary rows. A row can still be analyzed through status, normalized length, body hash, response order, dispatch timing, selected headers, and anomaly text.
-* Anomalous rows may also be metadata-only when their response body exceeds **Max body KB** or when that value is set to `0`.
+* Full response bodies are intentionally not retained for every row. A row can still be analyzed through status, normalized length, body hash, response order, dispatch timing, selected headers, and anomaly text.
+* Full-response retention is limited to one representative from the dominant response family, one representative from each divergent response family, and success-expression matches while the per-response and per-attempt budgets allow it. Rows may be metadata-only when their response body exceeds **Max body KB**, when that value is set to `0`, or when the attempt budget has already been reserved.
 * If Burp's HTTP API call is blocked below Java interruption, a readiness timeout cancels the attempt and updates the UI, but the underlying worker may not stop immediately. Use **Clear / Reset** before starting another batch.
 * It does not implement HTTP/1 last-byte synchronization.
 * It does not implement HTTP/2 single-packet attacks.
