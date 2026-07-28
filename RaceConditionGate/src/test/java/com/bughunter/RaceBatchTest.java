@@ -88,6 +88,18 @@ class RaceBatchTest {
     }
 
     @Test
+    void responseOrderStartsAtOneForEveryAttempt() {
+        RaceBatch batch = new RaceBatch(14, 2, 2, target("https", 443, true, "HTTP/1.1"), false);
+        RaceBatch.RaceAttempt first = batch.attempt(1);
+        RaceBatch.RaceAttempt second = batch.attempt(2);
+
+        assertEquals(1, first.nextResponseOrder());
+        assertEquals(2, first.nextResponseOrder());
+        assertEquals(1, second.nextResponseOrder());
+        assertEquals(2, second.nextResponseOrder());
+    }
+
+    @Test
     void targetCompatibilityRequiresSameEndpointAndProtocolUnlessMultiEndpointMode() {
         TargetMetadata base = target("Example.COM", 443, true, "HTTP/2");
         TargetMetadata same = target("example.com", 443, true, "http/2");

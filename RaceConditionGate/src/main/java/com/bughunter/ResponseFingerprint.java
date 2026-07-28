@@ -11,6 +11,7 @@ record ResponseFingerprint(
         Map<String, String> jsonFields,
         String redirectLocation,
         long responseTimeUs,
-        int responseOrder
+        int attemptOrder,
+        int batchOrder
 ) {
 }

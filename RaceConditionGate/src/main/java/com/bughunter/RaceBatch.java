@@ -96,6 +96,7 @@ final class RaceBatch {
         private final Set<Integer> readyWorkers = ConcurrentHashMap.newKeySet();
         private final AtomicInteger readyCount = new AtomicInteger(0);
         private final AtomicInteger completionCount = new AtomicInteger(0);
+        private final AtomicInteger responseOrder = new AtomicInteger(0);
         private final AtomicBoolean released = new AtomicBoolean(false);
         private volatile long releaseTimeNanos = 0;
 
@@ -125,6 +126,10 @@ final class RaceBatch {
 
         int completionCount() {
             return completionCount.get();
+        }
+
+        int nextResponseOrder() {
+            return responseOrder.incrementAndGet();
         }
 
         boolean isReleased() {

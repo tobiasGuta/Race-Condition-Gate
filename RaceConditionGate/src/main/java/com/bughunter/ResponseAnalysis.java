@@ -25,28 +25,31 @@ final class ResponseAnalysis {
     static ResponseFingerprint fingerprint(
             HttpResponse response,
             long responseTimeUs,
-            int responseOrder,
+            int attemptOrder,
+            int batchOrder,
             List<String> keywords,
             List<String> jsonPaths
     ) {
-        return fingerprint(response, responseTimeUs, responseOrder, keywords, jsonPaths, ResponseNormalization.none());
+        return fingerprint(response, responseTimeUs, attemptOrder, batchOrder, keywords, jsonPaths, ResponseNormalization.none());
     }
 
     static ResponseFingerprint fingerprint(
             HttpResponse response,
             long responseTimeUs,
-            int responseOrder,
+            int attemptOrder,
+            int batchOrder,
             List<String> keywords,
             List<String> jsonPaths,
             ResponseNormalization normalization
     ) {
-        return fingerprint(response, responseTimeUs, responseOrder, keywords, jsonPaths, normalization, List.of());
+        return fingerprint(response, responseTimeUs, attemptOrder, batchOrder, keywords, jsonPaths, normalization, List.of());
     }
 
     static ResponseFingerprint fingerprint(
             HttpResponse response,
             long responseTimeUs,
-            int responseOrder,
+            int attemptOrder,
+            int batchOrder,
             List<String> keywords,
             List<String> jsonPaths,
             ResponseNormalization normalization,
@@ -68,7 +71,8 @@ final class ResponseAnalysis {
                 jsonFields,
                 location,
                 responseTimeUs,
-                responseOrder
+                attemptOrder,
+                batchOrder
         );
     }
 

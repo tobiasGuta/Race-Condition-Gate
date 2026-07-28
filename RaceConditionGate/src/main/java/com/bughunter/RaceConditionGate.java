@@ -57,7 +57,7 @@ public class RaceConditionGate implements BurpExtension, ContextMenuItemsProvide
     private RaceBatch currentBatch = RaceBatch.empty();
     private RaceBatch.RaceAttempt currentAttempt;
     private final AtomicLong nextBatchId = new AtomicLong(1);
-    private final AtomicInteger responseOrder = new AtomicInteger(0);
+    private final AtomicInteger batchResponseOrder = new AtomicInteger(0);
     private final Map<Integer, ResponseFingerprint> baselineByRequestIndex = new ConcurrentHashMap<>();
     private final Map<RequestTemplateKey, ResponseFingerprint> baselineByRequestTemplate = new ConcurrentHashMap<>();
     private final Map<Integer, HttpResponse> pendingResponsesByRowId = new ConcurrentHashMap<>();
@@ -342,7 +342,7 @@ public class RaceConditionGate implements BurpExtension, ContextMenuItemsProvide
                 pendingResponseOmissionsByRowId.clear();
                 responseRetentionBudgetsByAttempt.clear();
                 clusterRepresentativeRowsByAttempt.clear();
-                responseOrder.set(0);
+                batchResponseOrder.set(0);
                 statusOverride = "";
                 pendingQueue.clear();
                 tableModel.clear();
@@ -597,7 +597,7 @@ public class RaceConditionGate implements BurpExtension, ContextMenuItemsProvide
             pendingResponseOmissionsByRowId.clear();
             responseRetentionBudgetsByAttempt.clear();
             clusterRepresentativeRowsByAttempt.clear();
-            responseOrder.set(0);
+            batchResponseOrder.set(0);
             statusOverride = "";
             currentAttempt = null;
             currentBatch = new RaceBatch(nextBatchId.getAndIncrement(), preparedRequests.size(), totalAttempts, targetMetadata, multiEndpointMode);
@@ -897,7 +897,7 @@ public class RaceConditionGate implements BurpExtension, ContextMenuItemsProvide
             long start = System.nanoTime();
             HttpRequestResponse response = api.http().sendRequest(preparedRequest.request());
             long responseTimeUs = (System.nanoTime() - start) / 1000;
-            ResponseFingerprint fingerprint = ResponseAnalysis.fingerprint(response.response(), responseTimeUs, 0, keywords, jsonPaths, normalization, expressionHeaderNames);
+            ResponseFingerprint fingerprint = ResponseAnalysis.fingerprint(response.response(), responseTimeUs, 0, 0, keywords, jsonPaths, normalization, expressionHeaderNames);
             baselineByRequestIndex.put(preparedRequest.requestIndex(), fingerprint);
             baselineByRequestTemplate.put(RequestTemplateKey.from(preparedRequest.request()), fingerprint);
         }
@@ -953,9 +953,10 @@ public class RaceConditionGate implements BurpExtension, ContextMenuItemsProvide
 
             HttpRequestResponse response = api.http().sendRequest(finalRequestToSend);
             long responseTimeUs = (System.nanoTime() - myStartTime) / 1000;
-            int order = responseOrder.incrementAndGet();
+            int attemptOrder = attempt.nextResponseOrder();
+            int batchOrder = batchResponseOrder.incrementAndGet();
             HttpResponse responseMessage = response.response();
-            ResponseFingerprint fingerprint = ResponseAnalysis.fingerprint(responseMessage, responseTimeUs, order, keywords, jsonPaths, normalization, expressionHeaderNames);
+            ResponseFingerprint fingerprint = ResponseAnalysis.fingerprint(responseMessage, responseTimeUs, attemptOrder, batchOrder, keywords, jsonPaths, normalization, expressionHeaderNames);
             ResponseFingerprint baseline = baselineFor(preparedRequest);
             String body = responseMessage.bodyToString();
             boolean successMatched = successExpression.matches(fingerprint, baseline, body);
@@ -1244,6 +1245,7 @@ public class RaceConditionGate implements BurpExtension, ContextMenuItemsProvide
             pendingResponseOmissionsByRowId.clear();
             responseRetentionBudgetsByAttempt.clear();
             clusterRepresentativeRowsByAttempt.clear();
+            batchResponseOrder.set(0);
             statusOverride = "";
 
             for(Future<?> task : activeTasks) {
@@ -1404,7 +1406,8 @@ public class RaceConditionGate implements BurpExtension, ContextMenuItemsProvide
                 "Time (us)",
                 "Dispatch Offset (us)",
                 "Body Hash",
-                "Order",
+                "Attempt Order",
+                "Batch Order",
                 "Anomaly"
         };
 
@@ -1442,8 +1445,9 @@ public class RaceConditionGate implements BurpExtension, ContextMenuItemsProvide
                 case 7 -> (r.timeTakenUs() == 0) ? "" : r.timeTakenUs();
                 case 8 -> (r.status().equals("Done")) ? r.dispatchOffsetUs() : "";
                 case 9 -> r.bodyHash();
-                case 10 -> (r.responseOrder() == 0) ? "" : r.responseOrder();
-                case 11 -> r.anomaly();
+                case 10 -> (r.attemptOrder() == 0) ? "" : r.attemptOrder();
+                case 11 -> (r.batchOrder() == 0) ? "" : r.batchOrder();
+                case 12 -> r.anomaly();
                 default -> "";
             };
         }

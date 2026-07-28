@@ -15,24 +15,25 @@ record RaceResultSnapshot(
         long timeTakenUs,
         long dispatchOffsetUs,
         String bodyHash,
-        int responseOrder,
+        int attemptOrder,
+        int batchOrder,
         String anomaly,
         ResponseFingerprint fingerprint
 ) {
     static RaceResultSnapshot queued(int id, int attempt, int requestIndex, HttpRequest request) {
-        return new RaceResultSnapshot(id, attempt, requestIndex, request, null, "Queued", (short) 0, 0, 0, 0, "", 0, "", null);
+        return new RaceResultSnapshot(id, attempt, requestIndex, request, null, "Queued", (short) 0, 0, 0, 0, "", 0, 0, "", null);
     }
 
     RaceResultSnapshot withStatus(String status) {
-        return new RaceResultSnapshot(id, attempt, requestIndex, request, response, status, statusCode, length, timeTakenUs, dispatchOffsetUs, bodyHash, responseOrder, anomaly, fingerprint);
+        return new RaceResultSnapshot(id, attempt, requestIndex, request, response, status, statusCode, length, timeTakenUs, dispatchOffsetUs, bodyHash, attemptOrder, batchOrder, anomaly, fingerprint);
     }
 
     RaceResultSnapshot withAnomaly(String anomaly) {
-        return new RaceResultSnapshot(id, attempt, requestIndex, request, response, status, statusCode, length, timeTakenUs, dispatchOffsetUs, bodyHash, responseOrder, anomaly, fingerprint);
+        return new RaceResultSnapshot(id, attempt, requestIndex, request, response, status, statusCode, length, timeTakenUs, dispatchOffsetUs, bodyHash, attemptOrder, batchOrder, anomaly, fingerprint);
     }
 
     RaceResultSnapshot withResponse(HttpResponse response) {
-        return new RaceResultSnapshot(id, attempt, requestIndex, request, response, status, statusCode, length, timeTakenUs, dispatchOffsetUs, bodyHash, responseOrder, anomaly, fingerprint);
+        return new RaceResultSnapshot(id, attempt, requestIndex, request, response, status, statusCode, length, timeTakenUs, dispatchOffsetUs, bodyHash, attemptOrder, batchOrder, anomaly, fingerprint);
     }
 
     RaceResultSnapshot completed(
@@ -55,7 +56,8 @@ record RaceResultSnapshot(
                 timeTakenUs,
                 dispatchOffsetUs,
                 fingerprint.bodyHash(),
-                fingerprint.responseOrder(),
+                fingerprint.attemptOrder(),
+                fingerprint.batchOrder(),
                 anomaly,
                 fingerprint
         );

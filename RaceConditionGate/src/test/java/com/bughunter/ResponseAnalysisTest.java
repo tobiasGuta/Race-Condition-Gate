@@ -62,6 +62,7 @@ class ResponseAnalysisTest {
                 Map.of("$.balance", "5"),
                 "/login",
                 100,
+                1,
                 1
         );
         ResponseFingerprint current = new ResponseFingerprint(
@@ -73,6 +74,7 @@ class ResponseAnalysisTest {
                 Map.of("$.balance", "10"),
                 "/success",
                 200,
+                2,
                 2
         );
 
@@ -107,6 +109,7 @@ class ResponseAnalysisTest {
                 Map.of(),
                 "",
                 100,
+                1,
                 1
         );
         ResponseFingerprint success = new ResponseFingerprint(
@@ -118,6 +121,7 @@ class ResponseAnalysisTest {
                 Map.of(),
                 "",
                 110,
+                19,
                 19
         );
 
@@ -245,10 +249,10 @@ class ResponseAnalysisTest {
     }
 
     private static ResponseFingerprint fingerprint(short status, Map<String, String> headers, Map<String, String> jsonFields) {
-        return new ResponseFingerprint(status, 0, "hash", headers, Map.of(), jsonFields, headers.getOrDefault("location", ""), 0, 0);
+        return new ResponseFingerprint(status, 0, "hash", headers, Map.of(), jsonFields, headers.getOrDefault("location", ""), 0, 0, 0);
     }
 
     private static ResponseFingerprint fingerprint(short status, int length, String hash) {
-        return new ResponseFingerprint(status, length, hash, Map.of(), Map.of(), Map.of(), "", 0, 0);
+        return new ResponseFingerprint(status, length, hash, Map.of(), Map.of(), Map.of(), "", 0, 0, 0);
     }
 }
