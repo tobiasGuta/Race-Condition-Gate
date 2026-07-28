@@ -164,11 +164,11 @@ public class RaceConditionGate implements BurpExtension, ContextMenuItemsProvide
             ignoredHeadersField = new JTextField(10);
             ignoredHeadersField.setToolTipText("Comma-separated response headers to ignore during baseline comparison and clustering.");
 
-            bodyNormalizationRegexArea = new JTextArea(2, 14);
+            bodyNormalizationRegexArea = new JTextArea(10, 48);
             bodyNormalizationRegexArea.setLineWrap(false);
             bodyNormalizationRegexArea.setToolTipText("One regex per line. Matches are replaced with <ignored> before response length/hash analysis.");
-            JScrollPane bodyRegexScroll = new JScrollPane(bodyNormalizationRegexArea);
-            bodyRegexScroll.setPreferredSize(new Dimension(170, 44));
+            JButton bodyRegexButton = new JButton("Body Regexes...");
+            bodyRegexButton.setToolTipText("Edit body normalization regexes, one per line.");
 
             ignoredJsonFieldsField = new JTextField(12);
             ignoredJsonFieldsField.setToolTipText("Comma-separated JSON paths, such as $.csrf or $.requestId, to redact before hashing and ignore in JSON comparisons.");
@@ -190,43 +190,56 @@ public class RaceConditionGate implements BurpExtension, ContextMenuItemsProvide
             // Stats Label
             statsLabel = new JLabel("Stats: Waiting...");
             statsLabel.setFont(new Font("SansSerif", Font.BOLD, 12));
-            statsLabel.setBorder(BorderFactory.createEmptyBorder(0, 20, 0, 0));
+            statsLabel.setBorder(BorderFactory.createEmptyBorder(0, 12, 0, 0));
             statsLabel.setToolTipText("Ready means worker threads completed any enabled best-effort warm-up and are waiting on the release latch.");
 
-            JPanel buttonPanel = new JPanel(new FlowLayout(FlowLayout.LEFT));
-            buttonPanel.add(armBtn);
-            buttonPanel.add(releaseBtn);
-            buttonPanel.add(clearBtn);
-            buttonPanel.add(removeQueuedBtn);
-            buttonPanel.add(duplicateQueuedBtn);
-            buttonPanel.add(moveQueuedUpBtn);
-            buttonPanel.add(moveQueuedDownBtn);
-            buttonPanel.add(clearQueueBtn);
-            buttonPanel.add(turboToggle);
-            buttonPanel.add(bestEffortWarmUpToggle);
-            buttonPanel.add(clipboardInjectionToggle);
-            buttonPanel.add(new JLabel("Attempts"));
-            buttonPanel.add(attemptsSpinner);
-            buttonPanel.add(autoReleaseAttemptsToggle);
-            buttonPanel.add(new JLabel("Baseline"));
-            buttonPanel.add(baselineModeCombo);
-            buttonPanel.add(multiEndpointModeToggle);
-            buttonPanel.add(new JLabel("Keywords"));
-            buttonPanel.add(keywordsField);
-            buttonPanel.add(new JLabel("Success"));
-            buttonPanel.add(successExpressionField);
-            buttonPanel.add(ignoreSetCookieToggle);
-            buttonPanel.add(new JLabel("Ignore headers"));
-            buttonPanel.add(ignoredHeadersField);
-            buttonPanel.add(new JLabel("Body regexes"));
-            buttonPanel.add(bodyRegexScroll);
-            buttonPanel.add(new JLabel("Ignore JSON"));
-            buttonPanel.add(ignoredJsonFieldsField);
-            buttonPanel.add(new JLabel("Max body KB"));
-            buttonPanel.add(maxResponseBodyKbSpinner);
-            buttonPanel.add(new JLabel("Ready timeout"));
-            buttonPanel.add(readyTimeoutSecondsSpinner);
-            buttonPanel.add(statsLabel);
+            JPanel controlPanel = new JPanel();
+            controlPanel.setLayout(new BoxLayout(controlPanel, BoxLayout.Y_AXIS));
+
+            JPanel actionRow = controlRow();
+            actionRow.add(armBtn);
+            actionRow.add(releaseBtn);
+            actionRow.add(clearBtn);
+            actionRow.add(removeQueuedBtn);
+            actionRow.add(duplicateQueuedBtn);
+            actionRow.add(moveQueuedUpBtn);
+            actionRow.add(moveQueuedDownBtn);
+            actionRow.add(clearQueueBtn);
+            actionRow.add(statsLabel);
+
+            JPanel modeRow = controlRow();
+            modeRow.add(turboToggle);
+            modeRow.add(bestEffortWarmUpToggle);
+            modeRow.add(clipboardInjectionToggle);
+            modeRow.add(new JLabel("Attempts"));
+            modeRow.add(attemptsSpinner);
+            modeRow.add(autoReleaseAttemptsToggle);
+            modeRow.add(new JLabel("Baseline"));
+            modeRow.add(baselineModeCombo);
+            modeRow.add(multiEndpointModeToggle);
+
+            JPanel analysisRow = controlRow();
+            analysisRow.add(new JLabel("Keywords"));
+            analysisRow.add(keywordsField);
+            analysisRow.add(new JLabel("Success"));
+            analysisRow.add(successExpressionField);
+            analysisRow.add(ignoreSetCookieToggle);
+            analysisRow.add(new JLabel("Ignore headers"));
+            analysisRow.add(ignoredHeadersField);
+            analysisRow.add(bodyRegexButton);
+
+            JPanel normalizationRow = controlRow();
+            normalizationRow.add(new JLabel("Ignore JSON"));
+            normalizationRow.add(ignoredJsonFieldsField);
+            normalizationRow.add(new JLabel("Max body KB"));
+            normalizationRow.add(maxResponseBodyKbSpinner);
+            normalizationRow.add(new JLabel("Ready timeout"));
+            normalizationRow.add(readyTimeoutSecondsSpinner);
+
+            controlPanel.add(actionRow);
+            controlPanel.add(modeRow);
+            controlPanel.add(analysisRow);
+            controlPanel.add(normalizationRow);
 
             // 3. Editors
             UserInterface ui = api.userInterface();
@@ -257,6 +270,7 @@ public class RaceConditionGate implements BurpExtension, ContextMenuItemsProvide
             moveQueuedUpBtn.addActionListener(e -> moveSelectedQueuedRequest(table, -1));
             moveQueuedDownBtn.addActionListener(e -> moveSelectedQueuedRequest(table, 1));
             clearQueueBtn.addActionListener(e -> clearStagedQueue());
+            bodyRegexButton.addActionListener(e -> editBodyNormalizationRegexes());
 
             turboToggle.addActionListener(e -> {
                 swapThreadPool(turboToggle.isSelected());
@@ -273,7 +287,7 @@ public class RaceConditionGate implements BurpExtension, ContextMenuItemsProvide
             mainSplit.setResizeWeight(0.4);
 
             JPanel mainPanel = new JPanel(new BorderLayout());
-            mainPanel.add(buttonPanel, BorderLayout.NORTH);
+            mainPanel.add(controlPanel, BorderLayout.NORTH);
             mainPanel.add(mainSplit, BorderLayout.CENTER);
 
             api.userInterface().registerSuiteTab("Race Gate", mainPanel);
@@ -1286,6 +1300,30 @@ public class RaceConditionGate implements BurpExtension, ContextMenuItemsProvide
     }
 
     // --- UI HELPERS ---
+    private JPanel controlRow() {
+        JPanel row = new JPanel(new FlowLayout(FlowLayout.LEFT, 6, 2));
+        row.setAlignmentX(Component.LEFT_ALIGNMENT);
+        return row;
+    }
+
+    private void editBodyNormalizationRegexes() {
+        JTextArea editor = new JTextArea(bodyNormalizationRegexArea.getText(), 10, 48);
+        editor.setLineWrap(false);
+        editor.setToolTipText(bodyNormalizationRegexArea.getToolTipText());
+        JScrollPane scrollPane = new JScrollPane(editor);
+        scrollPane.setPreferredSize(new Dimension(560, 220));
+        int choice = JOptionPane.showConfirmDialog(
+                null,
+                scrollPane,
+                "Body Normalization Regexes",
+                JOptionPane.OK_CANCEL_OPTION,
+                JOptionPane.PLAIN_MESSAGE
+        );
+        if (choice == JOptionPane.OK_OPTION) {
+            bodyNormalizationRegexArea.setText(editor.getText());
+        }
+    }
+
     private void updateTableSnapshot(int rowId, UnaryOperator<RaceResultSnapshot> updater) {
         SwingUtilities.invokeLater(() -> {
             if (rowId < tableModel.getRowCount()) {
