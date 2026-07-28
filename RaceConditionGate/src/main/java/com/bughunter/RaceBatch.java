@@ -3,6 +3,9 @@ package com.bughunter;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -90,6 +93,7 @@ final class RaceBatch {
         private final CountDownLatch readyLatch;
         private final CountDownLatch releaseLatch = new CountDownLatch(1);
         private final CountDownLatch completionLatch;
+        private final Set<Integer> readyWorkers = ConcurrentHashMap.newKeySet();
         private final AtomicInteger readyCount = new AtomicInteger(0);
         private final AtomicInteger completionCount = new AtomicInteger(0);
         private final AtomicBoolean released = new AtomicBoolean(false);
@@ -131,8 +135,14 @@ final class RaceBatch {
             return !batch.isCancelled() && !isReleased() && readyLatch.getCount() == 0;
         }
 
-        boolean markReady() {
+        boolean markReady(int workerId) {
             if (batch.isCancelled() || isReleased()) {
+                return false;
+            }
+            if (workerId < 1 || workerId > expectedWorkerCount) {
+                throw new IllegalArgumentException("workerId out of range: " + workerId);
+            }
+            if (!readyWorkers.add(workerId)) {
                 return false;
             }
             readyCount.incrementAndGet();
@@ -160,6 +170,10 @@ final class RaceBatch {
 
         void awaitReady() throws InterruptedException {
             readyLatch.await();
+        }
+
+        boolean awaitReady(long timeout, TimeUnit unit) throws InterruptedException {
+            return readyLatch.await(timeout, unit);
         }
 
         void awaitRelease() throws InterruptedException {

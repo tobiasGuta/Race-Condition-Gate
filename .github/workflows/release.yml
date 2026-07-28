@@ -22,6 +22,10 @@ jobs:
           distribution: temurin
           java-version: '21'
 
+      - name: Make Gradle executable
+        working-directory: RaceConditionGate
+        run: chmod +x gradlew
+
       - name: Build JAR
         working-directory: RaceConditionGate
         run: ./gradlew clean build

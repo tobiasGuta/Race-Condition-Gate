@@ -18,6 +18,7 @@ This is thread-level orchestration through Burp's Montoya HTTP stack. It does no
 ### 1. Advanced Synchronization & Network Logic
 * **Best-effort Connection Warm-up:** If enabled, each worker sends a lightweight `HEAD /` request before waiting at the gate. This may encourage DNS resolution or connection setup, but it creates extra target traffic and does not prove the real request will reuse the same connection.
 * **Ready-Gated Release:** Each batch owns its own attempt barriers, release latch, cancellation state, batch ID, target metadata, and expected worker count. The release button is enabled only when every worker for the active attempt is waiting at the gate.
+* **Readiness Timeout:** The coordinator stops waiting when workers fail to reach the gate within the configured timeout, cancels the attempt, and marks rows that were still warming, preparing, or queued.
 * **Bounded Worker Pools:** Safe mode uses 20 threads. Turbo mode uses a bounded 50-thread pool. Safe mode refuses a 50-request batch instead of silently running it in waves.
 * **Target Compatibility:** Precision batches enforce the same host, port, TLS mode, and HTTP protocol. Multi-endpoint mode is available when a logical race intentionally spans endpoints.
 
@@ -29,14 +30,17 @@ For raw timing precision, purpose-built tooling such as Burp Repeater's race-con
 The current project dependency is Montoya API `2023.12.1`, so this implementation does not use newer request options for explicit HTTP mode or connection identity. Newer Montoya API documentation exposes request options for HTTP mode and connection IDs; upgrading the dependency would be the right prerequisite before attempting stronger connection control.
 
 ### 3. Workflow Efficiency
-* **Batch Queueing:** A cascading context menu allows you to queue **1, 10, 20, or 50 requests** with a single click. The 50-request option requires Turbo mode.
-* **Repeated Attempts:** The attempts control supports runs such as `20 requests x 10 attempts`. Attempt 1 is manually released; later attempts auto-release once all workers are ready.
-* **Sequential Baseline:** Baseline mode sends the prepared requests sequentially before racing and compares race responses against status, length, body hash, selected headers, redirect location, keyword counts, and extracted JSON fields.
-* **Success Expressions:** A simple `and` expression can flag interesting responses, for example `status == 200 and body contains "redeemed" and json $.balance changed`.
+* **Editable Batch Queueing:** The context menu queues **1, 10, 20, or 50 requests** without immediately starting workers. You can add multiple requests, including different endpoints when Multi-endpoint mode is enabled, then freeze the queue with **ARM BATCH**. The 50-request option requires Turbo mode.
+* **Repeated Attempts:** The attempts control supports runs such as `20 requests x 10 attempts`. By default, every attempt waits for a manual release so the tester can restore target state between attempts. An explicit auto-release toggle can release later attempts automatically once every worker is ready.
+* **Baseline Modes:** Baseline defaults to **No baseline**. **Single-request baseline** sends one control request. **Full baseline (destructive)** sends every queued request sequentially before racing and requires confirmation because it can consume one-time application state.
+* **Attempt-Level Clustering:** Every completed attempt groups responses by status, body hash, response length, and selected headers. Minority response families are marked as anomalies even when baseline mode is disabled.
+* **Noise Normalization:** Ignore noisy headers, suppress `Set-Cookie`, redact JSON fields, and replace body regex matches before response length/hash comparison and clustering.
+* **Response Memory Limits:** Batches are capped at 500 request operations, with a warning above 200. Ordinary rows retain fingerprints and metadata only; full responses are retained for anomalous rows only when the body is within the configured maximum.
+* **Validated Success Expressions:** A simple `and` expression can flag interesting responses, for example `status == 200 and body contains "redeemed" and json $.balance changed`. Invalid terms are rejected before the batch is armed, and custom `header ... contains ...` terms are collected for matching.
 * **Legacy Compatibility:** Custom HTTP request construction ensures full compatibility with older versions of the Montoya API (2023.12.1+).
 
 ### 4. Dedicated UI Dashboard
-* **Queue Table:** A clear table showing every queued request, its method, and URL.
+* **Queue Table:** A clear table showing every queued request, its attempt, method, and URL.
 * **Real-Time Feedback:** The UI reports active attempt readiness before release, then updates each row with attempt number, status code, length, timing, thread dispatch offset, body hash, response order, and anomaly summary.
 * **Split-View Analysis:** Click any row to see the exact **Request** sent and **Response** received in a side-by-side view.
 * **Safe Reset:** A "Clear / Reset" button cancels all pending tasks and wipes the slate clean safely.
@@ -67,11 +71,17 @@ The current project dependency is Montoya API `2023.12.1`, so this implementatio
 1.  **Prepare a Request:** Send a request to Repeater (e.g., a coupon redemption or money transfer).
 2.  **Queue the Attack:**
     * Right-click the request -> **Race Gate Queue**.
-    * Select **Add 10 Requests** (or your desired amount).
+    * Select **Queue 10 Requests** (or your desired amount).
+    * For multi-endpoint races, repeat this from additional requests, then enable **Multi-endpoint** before arming.
     * Optionally enable **Best-effort warm-up** if extra `HEAD /` traffic is acceptable for the target and test plan.
-    * Optionally enable **Baseline**, set **Attempts**, configure comma-separated **Keywords**, and add a **Success** expression.
+    * Optionally choose a safe **Baseline** mode, set **Attempts**, configure comma-separated **Keywords**, and add a **Success** expression.
+    * Configure noise controls for dynamic response values such as timestamps, request IDs, CSRF tokens, analytics IDs, or session cookies.
+    * Set **Max body KB** to control how large an anomalous response body may be before the extension stores metadata only.
+    * Set **Ready timeout** to bound how long the coordinator waits for every worker to finish warm-up/preparation and reach the gate.
+    * Leave **Auto-release attempts** unchecked when target state must be restored between attempts.
 3.  **Execute:**
     * Go to the **"Race Gate"** tab.
+    * Click **ARM BATCH** to freeze the queue and start the workers.
     * Wait until the dashboard reports the active attempt is ready.
     * Click the red **RELEASE ALL** button.
 4.  **Analyze:**
@@ -94,12 +104,20 @@ https://github.com/user-attachments/assets/273b21bf-189f-454e-9e8c-6b75cba56d70
 * Generated `build/` output is ignored and should not be committed.
 * GitHub Actions builds the project on pushes and pull requests.
 * Tags matching `v*` create GitHub releases with the built JAR attached.
+* Unit tests cover batch barriers, duplicate readiness, cancellation, target compatibility, response analysis, success-expression validation, clustering, normalization, and operation limits. Burp UI workflows such as reset during an in-flight warm-up and worker submission failure still need integration coverage inside Burp or a Montoya-backed harness.
 
 ## Limitations
 * This extension does not control HTTP framing or packet emission directly.
 * The optional warm-up request is separate from the race request; Burp may select a different connection for the real request.
 * The optional warm-up request can trigger WAF, rate-limit, logging, routing, or authentication-side behavior.
 * The optional warm-up does not attempt to force connection reuse with the HTTP/1.1 `Connection` header because that would not provide meaningful HTTP/2 connection control.
+* Baseline requests are real target requests. Use **No baseline** or **Single-request baseline** for one-time actions such as coupon redemption, withdrawals, transfers, account changes, or order state transitions.
+* Repeated attempts can mutate the same target state repeatedly. Keep automatic attempt release disabled unless the test plan includes disposable state or a reliable reset workflow.
+* Body regex normalization is intentionally simple replacement before hashing. Invalid regexes are rejected when arming the batch.
+* Success expressions support `status == 200`, `status != 409`, `body contains "text"`, `body not contains "text"`, `header Name contains "text"`, `json $.field == value`, and `json $.field changed`. Unknown terms such as `stats == 200` are rejected before execution.
+* Full response bodies are intentionally not retained for ordinary rows. A row can still be analyzed through status, normalized length, body hash, response order, dispatch timing, selected headers, and anomaly text.
+* Anomalous rows may also be metadata-only when their response body exceeds **Max body KB** or when that value is set to `0`.
+* If Burp's HTTP API call is blocked below Java interruption, a readiness timeout cancels the attempt and updates the UI, but the underlying worker may not stop immediately. Use **Clear / Reset** before starting another batch.
 * It does not implement HTTP/1 last-byte synchronization.
 * It does not implement HTTP/2 single-packet attacks.
 * `Dispatch Offset (us)` measures when a Java worker resumed after latch release and began calling Burp's HTTP API. It does not measure when bytes left the machine, when the server received the request, or when the server began processing it.

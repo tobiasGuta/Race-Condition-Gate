@@ -8,12 +8,14 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 final class SuccessExpression {
-    private static final SuccessExpression EMPTY = new SuccessExpression(List.of());
+    private static final SuccessExpression EMPTY = new SuccessExpression(List.of(), List.of());
 
     private final List<Term> terms;
+    private final List<String> referencedHeaders;
 
-    private SuccessExpression(List<Term> terms) {
+    private SuccessExpression(List<Term> terms, List<String> referencedHeaders) {
         this.terms = terms;
+        this.referencedHeaders = referencedHeaders;
     }
 
     static SuccessExpression parse(String expression) {
@@ -22,13 +24,18 @@ final class SuccessExpression {
         }
 
         List<Term> parsed = new ArrayList<>();
+        List<String> headers = new ArrayList<>();
         for (String part : expression.split("(?i)\\s+and\\s+")) {
             String term = part.trim();
             if (!term.isEmpty()) {
-                parsed.add(parseTerm(term));
+                ParsedTerm parsedTerm = parseTerm(term);
+                parsed.add(parsedTerm.term());
+                if (parsedTerm.referencedHeader() != null && !headers.contains(parsedTerm.referencedHeader())) {
+                    headers.add(parsedTerm.referencedHeader());
+                }
             }
         }
-        return new SuccessExpression(List.copyOf(parsed));
+        return new SuccessExpression(List.copyOf(parsed), List.copyOf(headers));
     }
 
     boolean isEmpty() {
@@ -44,43 +51,65 @@ final class SuccessExpression {
         return !terms.isEmpty();
     }
 
-    private static Term parseTerm(String term) {
+    List<String> referencedHeaders() {
+        return referencedHeaders;
+    }
+
+    private static ParsedTerm parseTerm(String term) {
         Matcher statusMatcher = Pattern.compile("status\\s*(==|!=)\\s*(\\d+)", Pattern.CASE_INSENSITIVE).matcher(term);
         if (statusMatcher.matches()) {
-            short expected = Short.parseShort(statusMatcher.group(2));
+            int status;
+            try {
+                status = Integer.parseInt(statusMatcher.group(2));
+            } catch (NumberFormatException e) {
+                throw new InvalidExpressionException(term, "status code must be between 100 and 599");
+            }
+            if (status < 100 || status > 599) {
+                throw new InvalidExpressionException(term, "status code must be between 100 and 599");
+            }
+            short expected = (short) status;
             boolean equals = statusMatcher.group(1).equals("==");
-            return (current, baseline, body) -> equals == (current.statusCode() == expected);
+            return new ParsedTerm((current, baseline, body) -> equals == (current.statusCode() == expected), null);
         }
 
         Matcher bodyMatcher = Pattern.compile("body\\s+(contains|not contains)\\s+(.+)", Pattern.CASE_INSENSITIVE).matcher(term);
         if (bodyMatcher.matches()) {
             boolean contains = bodyMatcher.group(1).equalsIgnoreCase("contains");
             String needle = unquote(bodyMatcher.group(2));
-            return (current, baseline, body) -> contains == body.contains(needle);
+            if (needle.isEmpty()) {
+                throw new InvalidExpressionException(term, "body match text cannot be empty");
+            }
+            return new ParsedTerm((current, baseline, body) -> contains == body.contains(needle), null);
         }
 
         Matcher headerMatcher = Pattern.compile("header\\s+([A-Za-z0-9_-]+)\\s+contains\\s+(.+)", Pattern.CASE_INSENSITIVE).matcher(term);
         if (headerMatcher.matches()) {
             String headerName = headerMatcher.group(1).toLowerCase(Locale.ROOT);
             String needle = unquote(headerMatcher.group(2));
-            return (current, baseline, body) -> current.selectedHeaders().getOrDefault(headerName, "").contains(needle);
+            if (needle.isEmpty()) {
+                throw new InvalidExpressionException(term, "header match text cannot be empty");
+            }
+            return new ParsedTerm((current, baseline, body) -> current.selectedHeaders().getOrDefault(headerName, "").contains(needle), headerName);
         }
 
         Matcher jsonChangedMatcher = Pattern.compile("json\\s+(\\$\\.[A-Za-z0-9_.-]+)\\s+changed", Pattern.CASE_INSENSITIVE).matcher(term);
         if (jsonChangedMatcher.matches()) {
             String path = jsonChangedMatcher.group(1);
-            return (current, baseline, body) -> baseline != null
-                    && !baseline.jsonFields().getOrDefault(path, "").equals(current.jsonFields().getOrDefault(path, ""));
+            return new ParsedTerm((current, baseline, body) -> baseline != null
+                    && !baseline.jsonFields().getOrDefault(path, "").equals(current.jsonFields().getOrDefault(path, "")), null);
         }
 
         Matcher jsonEqualsMatcher = Pattern.compile("json\\s+(\\$\\.[A-Za-z0-9_.-]+)\\s*==\\s*(.+)", Pattern.CASE_INSENSITIVE).matcher(term);
         if (jsonEqualsMatcher.matches()) {
             String path = jsonEqualsMatcher.group(1);
             String expected = unquote(jsonEqualsMatcher.group(2));
-            return (current, baseline, body) -> expected.equals(current.jsonFields().getOrDefault(path, ""));
+            if (expected.isEmpty()) {
+                throw new InvalidExpressionException(term, "JSON expected value cannot be empty");
+            }
+            return new ParsedTerm((current, baseline, body) -> expected.equals(current.jsonFields().getOrDefault(path, "")), null);
         }
 
-        return (current, baseline, body) -> false;
+        throw new InvalidExpressionException(term, "unsupported success-expression term");
     }
 
     static List<String> jsonPathsFromExpression(String expression) {
@@ -108,5 +137,13 @@ final class SuccessExpression {
 
     private interface Term {
         boolean matches(ResponseFingerprint current, ResponseFingerprint baseline, String body);
+    }
+
+    private record ParsedTerm(Term term, String referencedHeader) {}
+
+    static final class InvalidExpressionException extends IllegalArgumentException {
+        InvalidExpressionException(String term, String reason) {
+            super("Invalid success expression term '" + term + "': " + reason);
+        }
     }
 }

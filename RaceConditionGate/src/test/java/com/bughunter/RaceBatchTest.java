@@ -2,6 +2,8 @@ package com.bughunter;
 
 import org.junit.jupiter.api.Test;
 
+import java.util.concurrent.TimeUnit;
+
 import static org.junit.jupiter.api.Assertions.*;
 
 class RaceBatchTest {
@@ -11,11 +13,11 @@ class RaceBatchTest {
         RaceBatch.RaceAttempt attempt = batch.attempt(1);
 
         assertFalse(attempt.isReadyToRelease());
-        assertTrue(attempt.markReady());
+        assertTrue(attempt.markReady(1));
         assertEquals(1, attempt.readyCount());
         assertFalse(attempt.release());
 
-        assertTrue(attempt.markReady());
+        assertTrue(attempt.markReady(2));
         assertEquals(2, attempt.readyCount());
         assertTrue(attempt.isReadyToRelease());
         assertTrue(attempt.release());
@@ -32,14 +34,57 @@ class RaceBatchTest {
         batch.cancel();
 
         assertTrue(batch.isCancelled());
-        assertFalse(first.markReady());
-        assertFalse(second.markReady());
+        assertFalse(first.markReady(1));
+        assertFalse(second.markReady(1));
         assertFalse(first.release());
         assertFalse(second.release());
-        assertDoesNotThrow(first::awaitReady);
+        assertDoesNotThrow(() -> first.awaitReady());
         assertDoesNotThrow(first::awaitRelease);
         assertDoesNotThrow(first::awaitCompletion);
         assertDoesNotThrow(second::awaitRelease);
+    }
+
+    @Test
+    void awaitReadyCanTimeOutBeforeEveryWorkerIsReady() throws InterruptedException {
+        RaceBatch batch = new RaceBatch(11, 2, 1, target("https", 443, true, "HTTP/1.1"), false);
+        RaceBatch.RaceAttempt attempt = batch.attempt(1);
+
+        assertTrue(attempt.markReady(1));
+        assertFalse(attempt.awaitReady(10, TimeUnit.MILLISECONDS));
+
+        assertTrue(attempt.markReady(2));
+        assertTrue(attempt.awaitReady(10, TimeUnit.MILLISECONDS));
+    }
+
+    @Test
+    void duplicateMarkReadyDoesNotReleaseGateEarly() {
+        RaceBatch batch = new RaceBatch(12, 2, 1, target("https", 443, true, "HTTP/1.1"), false);
+        RaceBatch.RaceAttempt attempt = batch.attempt(1);
+
+        assertTrue(attempt.markReady(1));
+        assertFalse(attempt.markReady(1));
+        assertEquals(1, attempt.readyCount());
+        assertFalse(attempt.isReadyToRelease());
+
+        assertTrue(attempt.markReady(2));
+        assertEquals(2, attempt.readyCount());
+        assertTrue(attempt.isReadyToRelease());
+    }
+
+    @Test
+    void multipleAttemptsTrackReadinessIndependently() {
+        RaceBatch batch = new RaceBatch(13, 2, 2, target("https", 443, true, "HTTP/1.1"), false);
+        RaceBatch.RaceAttempt first = batch.attempt(1);
+        RaceBatch.RaceAttempt second = batch.attempt(2);
+
+        assertTrue(first.markReady(1));
+        assertTrue(first.markReady(2));
+        assertTrue(first.isReadyToRelease());
+
+        assertEquals(0, second.readyCount());
+        assertFalse(second.isReadyToRelease());
+        assertTrue(second.markReady(1));
+        assertFalse(second.isReadyToRelease());
     }
 
     @Test

@@ -16,18 +16,28 @@ record RaceResultSnapshot(
         long dispatchOffsetUs,
         String bodyHash,
         int responseOrder,
-        String anomaly
+        String anomaly,
+        ResponseFingerprint fingerprint
 ) {
     static RaceResultSnapshot queued(int id, int attempt, int requestIndex, HttpRequest request) {
-        return new RaceResultSnapshot(id, attempt, requestIndex, request, null, "Queued", (short) 0, 0, 0, 0, "", 0, "");
+        return new RaceResultSnapshot(id, attempt, requestIndex, request, null, "Queued", (short) 0, 0, 0, 0, "", 0, "", null);
     }
 
     RaceResultSnapshot withStatus(String status) {
-        return new RaceResultSnapshot(id, attempt, requestIndex, request, response, status, statusCode, length, timeTakenUs, dispatchOffsetUs, bodyHash, responseOrder, anomaly);
+        return new RaceResultSnapshot(id, attempt, requestIndex, request, response, status, statusCode, length, timeTakenUs, dispatchOffsetUs, bodyHash, responseOrder, anomaly, fingerprint);
+    }
+
+    RaceResultSnapshot withAnomaly(String anomaly) {
+        return new RaceResultSnapshot(id, attempt, requestIndex, request, response, status, statusCode, length, timeTakenUs, dispatchOffsetUs, bodyHash, responseOrder, anomaly, fingerprint);
+    }
+
+    RaceResultSnapshot withResponse(HttpResponse response) {
+        return new RaceResultSnapshot(id, attempt, requestIndex, request, response, status, statusCode, length, timeTakenUs, dispatchOffsetUs, bodyHash, responseOrder, anomaly, fingerprint);
     }
 
     RaceResultSnapshot completed(
-            HttpResponse response,
+            HttpResponse rawResponse,
+            HttpResponse retainedResponse,
             ResponseFingerprint fingerprint,
             long timeTakenUs,
             long dispatchOffsetUs,
@@ -38,15 +48,16 @@ record RaceResultSnapshot(
                 attempt,
                 requestIndex,
                 request,
-                response,
+                retainedResponse,
                 "Done",
-                response.statusCode(),
-                response.body().length(),
+                rawResponse.statusCode(),
+                fingerprint.length(),
                 timeTakenUs,
                 dispatchOffsetUs,
                 fingerprint.bodyHash(),
                 fingerprint.responseOrder(),
-                anomaly
+                anomaly,
+                fingerprint
         );
     }
 }
